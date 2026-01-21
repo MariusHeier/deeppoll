@@ -117,7 +117,7 @@ class Program
 
         if (choice == "1")
         {
-            RunPollCheck(verbose, "054C:05C4", "Keep PRESSING buttons or moving sticks!");
+            RunPollCheck(verbose, "054C:05C4");
             return;
         }
 
