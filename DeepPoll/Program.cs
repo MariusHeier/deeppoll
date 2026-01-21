@@ -19,9 +19,12 @@ class UsbTransaction
     public double StartTimestamp { get; set; }
     public double EndTimestamp { get; set; }
     public uint Status { get; set; }
+    public ushort VendorId { get; set; }
+    public ushort ProductId { get; set; }
 
     public double DurationUs => (EndTimestamp - StartTimestamp) * 1000.0;
     public bool IsComplete => EndTimestamp > 0;
+    public string VidPid => VendorId > 0 ? $"{VendorId:X4}:{ProductId:X4}" : "";
 }
 
 class Program
@@ -94,8 +97,8 @@ class Program
 
         if (!isMH4)
         {
-            // Other USB device - just run poll check, auto-select device with most samples
-            RunPollCheck(verbose, null, "Keep using your device during the capture!");
+            // Other USB device - capture and let user select from found devices
+            RunPollCheck(verbose, null, null);
             return;
         }
 
@@ -141,13 +144,16 @@ class Program
         }
     }
 
-    static void RunPollCheck(bool verbose, string? deviceFilter, string deviceInstruction = "Keep using the device during capture!")
+    static void RunPollCheck(bool verbose, string? deviceFilter, string? deviceInstruction = null)
     {
         Console.WriteLine();
         Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
         Console.WriteLine("  │  Make sure your device is plugged in.               │");
-        Console.WriteLine("  │                                                     │");
-        Console.WriteLine($"  │  {deviceInstruction,-51} │");
+        if (deviceInstruction != null)
+        {
+            Console.WriteLine("  │                                                     │");
+            Console.WriteLine($"  │  {deviceInstruction,-51} │");
+        }
         Console.WriteLine("  │                                                     │");
         Console.WriteLine("  │  Press ENTER to start 7-second capture.             │");
         Console.WriteLine("  └─────────────────────────────────────────────────────┘");
@@ -343,16 +349,79 @@ class Program
         // Group by device handle to find unique devices
         var deviceGroups = interruptTx
             .GroupBy(t => t.DeviceHandle)
-            .Select(g => new {
-                Handle = g.Key,
-                Transactions = g.OrderBy(t => t.EndTimestamp).ToList(),
-                Count = g.Count()
+            .Select(g => {
+                var txList = g.OrderBy(t => t.EndTimestamp).ToList();
+                // Get VID:PID from first transaction that has it
+                var withVidPid = txList.FirstOrDefault(t => t.VendorId > 0);
+                string vidPid = withVidPid?.VidPid ?? "Unknown";
+
+                // Estimate poll rate from average interval
+                double avgIntervalUs = 0;
+                if (txList.Count > 1)
+                {
+                    var intervals = new List<double>();
+                    for (int i = 1; i < txList.Count; i++)
+                    {
+                        double interval = (txList[i].EndTimestamp - txList[i - 1].EndTimestamp) * 1000;
+                        if (interval > 0 && interval < 50000) intervals.Add(interval);
+                    }
+                    if (intervals.Count > 0) avgIntervalUs = intervals.Average();
+                }
+                double estimatedHz = avgIntervalUs > 0 ? 1000000.0 / avgIntervalUs : 0;
+
+                return new {
+                    Handle = g.Key,
+                    Transactions = txList,
+                    Count = g.Count(),
+                    VidPid = vidPid,
+                    EstimatedHz = estimatedHz
+                };
             })
             .OrderByDescending(g => g.Count)
             .ToList();
 
-        // Auto-select device with most samples (already sorted by count descending)
-        var selectedTransactions = deviceGroups[0].Transactions;
+        List<UsbTransaction> selectedTransactions;
+
+        // If filterDevice specified, use that
+        if (!string.IsNullOrEmpty(filterDevice))
+        {
+            var filtered = deviceGroups.FirstOrDefault(g => g.VidPid == filterDevice);
+            if (filtered == null)
+            {
+                Console.WriteLine($"  Device {filterDevice} not found in trace.");
+                return;
+            }
+            selectedTransactions = filtered.Transactions;
+        }
+        // If only one device, auto-select
+        else if (deviceGroups.Count == 1)
+        {
+            selectedTransactions = deviceGroups[0].Transactions;
+        }
+        // Multiple devices - let user select
+        else
+        {
+            Console.WriteLine();
+            Console.WriteLine("  Found devices:");
+            Console.WriteLine();
+            for (int i = 0; i < deviceGroups.Count; i++)
+            {
+                var g = deviceGroups[i];
+                string hzStr = g.EstimatedHz > 0 ? $"~{g.EstimatedHz:F0} Hz" : "";
+                Console.WriteLine($"    [{i + 1}] {g.VidPid,-12} {g.Count,6:N0} samples  {hzStr}");
+            }
+            Console.WriteLine();
+            Console.Write("  Select: ");
+
+            string? choice = Console.ReadLine()?.Trim();
+            if (!int.TryParse(choice, out int idx) || idx < 1 || idx > deviceGroups.Count)
+            {
+                Console.WriteLine("  Invalid selection.");
+                return;
+            }
+
+            selectedTransactions = deviceGroups[idx - 1].Transactions;
+        }
 
         // Calculate intervals for selected device
         var sorted = selectedTransactions;
@@ -491,8 +560,11 @@ class Program
                 {
                     ulong deviceHandle = 0;
                     ulong pipeHandle = 0;
+                    ushort vid = 0, pid = 0;
                     try { deviceHandle = Convert.ToUInt64(data.PayloadByName("fid_UsbDevice")); } catch { }
                     try { pipeHandle = Convert.ToUInt64(data.PayloadByName("fid_PipeHandle")); } catch { }
+                    try { vid = Convert.ToUInt16(data.PayloadByName("fid_idVendor")); } catch { }
+                    try { pid = Convert.ToUInt16(data.PayloadByName("fid_idProduct")); } catch { }
 
                     pendingTransactions[urbPtr] = new UsbTransaction
                     {
@@ -500,7 +572,9 @@ class Program
                         DeviceHandle = deviceHandle,
                         PipeHandle = pipeHandle,
                         Type = txType,
-                        StartTimestamp = data.TimeStampRelativeMSec
+                        StartTimestamp = data.TimeStampRelativeMSec,
+                        VendorId = vid,
+                        ProductId = pid
                     };
                 }
                 else if (isComplete)
