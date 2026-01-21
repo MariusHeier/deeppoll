@@ -91,8 +91,29 @@ class Program
 
         if (!isMH4)
         {
-            // Other USB device - just poll check
-            RunPollCheck(verbose, null);
+            // Other USB device - ask what type
+            Console.WriteLine();
+            PrintSingleLine(60);
+            Console.WriteLine();
+            Console.WriteLine("  What type of device?");
+            Console.WriteLine();
+            Console.WriteLine("    [1] Mouse");
+            Console.WriteLine("    [2] Gamepad / Controller");
+            Console.WriteLine("    [3] Keyboard");
+            Console.WriteLine("    [4] Other");
+            Console.WriteLine();
+            Console.Write("  Select: ");
+
+            string? deviceType = Console.ReadLine()?.Trim();
+            string deviceInstruction = deviceType switch
+            {
+                "1" => "Keep MOVING your mouse during the capture!",
+                "2" => "Keep PRESSING buttons or moving sticks!",
+                "3" => "Keep PRESSING keys during the capture!",
+                _ => "Keep using the device during capture!"
+            };
+
+            RunPollCheck(verbose, null, deviceInstruction);
             return;
         }
 
@@ -111,7 +132,7 @@ class Program
 
         if (choice == "1")
         {
-            RunPollCheck(verbose, "054C:05C4");
+            RunPollCheck(verbose, "054C:05C4", "Keep PRESSING buttons or moving sticks!");
             return;
         }
 
@@ -138,12 +159,15 @@ class Program
         }
     }
 
-    static void RunPollCheck(bool verbose, string? deviceFilter)
+    static void RunPollCheck(bool verbose, string? deviceFilter, string deviceInstruction = "Keep using the device during capture!")
     {
         Console.WriteLine();
         Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
         Console.WriteLine("  │  Make sure your device is plugged in.               │");
-        Console.WriteLine("  │  Press ENTER to start.                              │");
+        Console.WriteLine("  │                                                     │");
+        Console.WriteLine($"  │  {deviceInstruction,-51} │");
+        Console.WriteLine("  │                                                     │");
+        Console.WriteLine("  │  Press ENTER to start 7-second capture.             │");
         Console.WriteLine("  └─────────────────────────────────────────────────────┘");
         Console.ReadLine();
 
