@@ -94,29 +94,8 @@ class Program
 
         if (!isMH4)
         {
-            // Other USB device - ask what type
-            Console.WriteLine();
-            PrintSingleLine(60);
-            Console.WriteLine();
-            Console.WriteLine("  What type of device?");
-            Console.WriteLine();
-            Console.WriteLine("    [1] Mouse");
-            Console.WriteLine("    [2] Gamepad / Controller");
-            Console.WriteLine("    [3] Keyboard");
-            Console.WriteLine("    [4] Other");
-            Console.WriteLine();
-            Console.Write("  Select: ");
-
-            string? deviceType = Console.ReadLine()?.Trim();
-            string deviceInstruction = deviceType switch
-            {
-                "1" => "Keep MOVING your mouse during the capture!",
-                "2" => "Keep PRESSING buttons or moving sticks!",
-                "3" => "Keep PRESSING keys during the capture!",
-                _ => "Keep using the device during capture!"
-            };
-
-            RunPollCheck(verbose, null, deviceInstruction);
+            // Other USB device - just run poll check, auto-select device with most samples
+            RunPollCheck(verbose, null, "Keep using your device during the capture!");
             return;
         }
 
@@ -372,52 +351,8 @@ class Program
             .OrderByDescending(g => g.Count)
             .ToList();
 
-        List<UsbTransaction> selectedTransactions;
-
-        if (deviceGroups.Count > 1)
-        {
-            // Multiple devices found - let user pick
-            Console.WriteLine();
-            Console.WriteLine($"  Found {deviceGroups.Count} active devices:");
-            Console.WriteLine();
-
-            for (int i = 0; i < deviceGroups.Count; i++)
-            {
-                var grp = deviceGroups[i];
-                // Estimate Hz from this device's data
-                double estHz = 0;
-                if (grp.Count > 1)
-                {
-                    var txList = grp.Transactions;
-                    var gaps = new List<double>();
-                    for (int j = 1; j < txList.Count; j++)
-                    {
-                        double gap = (txList[j].EndTimestamp - txList[j - 1].EndTimestamp) * 1000;
-                        if (gap > 0 && gap < 50000) gaps.Add(gap);
-                    }
-                    if (gaps.Count > 0) estHz = 1000000.0 / gaps.Average();
-                }
-                Console.WriteLine($"    [{i + 1}] Device {i + 1} - {grp.Count:N0} samples (~{estHz:F0} Hz)");
-            }
-
-            Console.WriteLine();
-            Console.Write("  Select: ");
-            string? choice = Console.ReadLine()?.Trim();
-
-            int selectedIdx = 0;
-            if (int.TryParse(choice, out int parsed) && parsed >= 1 && parsed <= deviceGroups.Count)
-            {
-                selectedIdx = parsed - 1;
-            }
-
-            selectedTransactions = deviceGroups[selectedIdx].Transactions;
-            Console.WriteLine();
-        }
-        else
-        {
-            // Only one device
-            selectedTransactions = deviceGroups[0].Transactions;
-        }
+        // Auto-select device with most samples (already sorted by count descending)
+        var selectedTransactions = deviceGroups[0].Transactions;
 
         // Calculate intervals for selected device
         var sorted = selectedTransactions;
