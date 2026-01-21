@@ -98,7 +98,7 @@ class Program
         if (!isMH4)
         {
             // Other USB device - capture and let user select from found devices
-            RunPollCheck(verbose, null, null);
+            RunPollCheck(verbose, null);
             return;
         }
 
