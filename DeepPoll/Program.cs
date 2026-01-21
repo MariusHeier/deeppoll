@@ -221,7 +221,8 @@ class Program
             Console.WriteLine($"  │                                                     │");
             Console.WriteLine($"  │  Log ID: {logId,-43} │");
             Console.WriteLine($"  │                                                     │");
-            Console.WriteLine($"  │  Send this ID to Marius on Discord.                 │");
+            Console.WriteLine($"  │  Send this ID to Marius on Discord:                 │");
+            Console.WriteLine($"  │  https://discord.gg/4Q9SRUt85j                      │");
             Console.WriteLine($"  └─────────────────────────────────────────────────────┘");
         }
 
@@ -290,7 +291,8 @@ class Program
             Console.WriteLine($"  │                                                     │");
             Console.WriteLine($"  │  Log ID: {logId,-43} │");
             Console.WriteLine($"  │                                                     │");
-            Console.WriteLine($"  │  Send this ID to Marius on Discord.                 │");
+            Console.WriteLine($"  │  Send this ID to Marius on Discord:                 │");
+            Console.WriteLine($"  │  https://discord.gg/4Q9SRUt85j                      │");
             Console.WriteLine($"  └─────────────────────────────────────────────────────┘");
         }
 
