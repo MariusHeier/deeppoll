@@ -382,16 +382,19 @@ class Program
 
         List<UsbTransaction> selectedTransactions;
 
-        // If filterDevice specified, use that
+        // If filterDevice specified, try to use that
         if (!string.IsNullOrEmpty(filterDevice))
         {
             var filtered = deviceGroups.FirstOrDefault(g => g.VidPid == filterDevice);
-            if (filtered == null)
+            if (filtered != null)
             {
-                Console.WriteLine($"  Device {filterDevice} not found in trace.");
-                return;
+                selectedTransactions = filtered.Transactions;
             }
-            selectedTransactions = filtered.Transactions;
+            else
+            {
+                // VID:PID not in ETL data - auto-select device with most samples
+                selectedTransactions = deviceGroups[0].Transactions;
+            }
         }
         // If only one device, auto-select
         else if (deviceGroups.Count == 1)
