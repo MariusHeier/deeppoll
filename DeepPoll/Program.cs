@@ -117,7 +117,7 @@ class Program
 
         if (choice == "1")
         {
-            RunPollCheck(verbose, "054C:05C4");
+            RunPollCheck(verbose, "054C:05C4", 20);
             return;
         }
 
@@ -144,7 +144,7 @@ class Program
         }
     }
 
-    static void RunPollCheck(bool verbose, string? deviceFilter, string? deviceInstruction = null)
+    static void RunPollCheck(bool verbose, string? deviceFilter, int durationSeconds = 7, string? deviceInstruction = null)
     {
         Console.WriteLine();
         Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
@@ -155,17 +155,17 @@ class Program
             Console.WriteLine($"  │  {deviceInstruction,-51} │");
         }
         Console.WriteLine("  │                                                     │");
-        Console.WriteLine("  │  Press ENTER to start 7-second capture.             │");
+        Console.WriteLine("  │  Press ENTER to start capture.                      │");
         Console.WriteLine("  └─────────────────────────────────────────────────────┘");
         Console.ReadLine();
 
         string etlPath = Path.Combine(Path.GetTempPath(), "deeppoll_capture.etl");
 
         Console.WriteLine();
-        Console.WriteLine("  Capturing for 7 seconds...");
+        Console.WriteLine($"  Capturing for {durationSeconds} seconds...");
         Console.WriteLine();
 
-        StartEtwCapture(etlPath, 7);
+        StartEtwCapture(etlPath, durationSeconds);
 
         Console.WriteLine("  Processing...");
         Console.WriteLine();
