@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Management;
+using System.Net.Http;
 using System.Security.Principal;
+using System.Text.Json;
 using System.Threading;
 using Microsoft.Diagnostics.Tracing;
 
@@ -209,9 +212,18 @@ class Program
 
         AnalyzeEtl(etlPath, false, "054C:05C4");
 
-        // TODO: Compress and upload
-        Console.WriteLine();
-        Console.WriteLine("  [Upload not implemented yet]");
+        string? logId = UploadLog(etlPath, "startup");
+        if (logId != null)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"  ┌─────────────────────────────────────────────────────┐");
+            Console.WriteLine($"  │  Upload complete!                                    │");
+            Console.WriteLine($"  │                                                     │");
+            Console.WriteLine($"  │  Log ID: {logId,-43} │");
+            Console.WriteLine($"  │                                                     │");
+            Console.WriteLine($"  │  Send this ID to Marius on Discord.                 │");
+            Console.WriteLine($"  └─────────────────────────────────────────────────────┘");
+        }
 
         try { File.Delete(etlPath); } catch { }
     }
@@ -269,9 +281,18 @@ class Program
 
         AnalyzeEtl(etlPath, false, "054C:05C4");
 
-        // TODO: Compress and upload
-        Console.WriteLine();
-        Console.WriteLine("  [Upload not implemented yet]");
+        string? logId = UploadLog(etlPath, "disconnect");
+        if (logId != null)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"  ┌─────────────────────────────────────────────────────┐");
+            Console.WriteLine($"  │  Upload complete!                                    │");
+            Console.WriteLine($"  │                                                     │");
+            Console.WriteLine($"  │  Log ID: {logId,-43} │");
+            Console.WriteLine($"  │                                                     │");
+            Console.WriteLine($"  │  Send this ID to Marius on Discord.                 │");
+            Console.WriteLine($"  └─────────────────────────────────────────────────────┘");
+        }
 
         try { File.Delete(etlPath); } catch { }
     }
@@ -373,16 +394,36 @@ class Program
         Console.WriteLine("  Timing Distribution:");
         Console.WriteLine();
 
-        // Bin by Hz (convert from interval µs)
-        // interval µs → Hz = 1,000,000 / interval
-        var bins = new (string Label, double MinUs, double MaxUs)[]
+        // Auto-bin based on data range
+        double medianUs = Percentile(sortedIntervals, 50);
+        double p5 = Percentile(sortedIntervals, 5);
+        double p95 = Percentile(sortedIntervals, 95);
+
+        // Create 8 bins covering most of the data (p5 to p95)
+        double binWidth = (p95 - p5) / 6.0;
+        if (binWidth < 1) binWidth = 1;
+
+        var binList = new List<(string Label, double MinUs, double MaxUs)>();
+
+        // First bin: everything faster than p5
+        double fastestHz = 1000000.0 / p5;
+        binList.Add(($">{fastestHz:F0} Hz", 0, p5));
+
+        // Middle bins
+        for (int i = 0; i < 6; i++)
         {
-            ("8000+ Hz", 0, 125),        // < 125µs = > 8000 Hz
-            ("7700-8000", 125, 130),     // 125-130µs
-            ("7200-7700", 130, 139),     // 130-139µs
-            ("5000-7200", 139, 200),     // 139-200µs
-            ("<5000 Hz", 200, double.MaxValue)  // > 200µs = < 5000 Hz
-        };
+            double minUs = p5 + i * binWidth;
+            double maxUs = p5 + (i + 1) * binWidth;
+            double minHz = 1000000.0 / maxUs;
+            double maxHz = 1000000.0 / minUs;
+            binList.Add(($"{minHz:F0}-{maxHz:F0}", minUs, maxUs));
+        }
+
+        // Last bin: everything slower than p95
+        double slowestHz = 1000000.0 / p95;
+        binList.Add(($"<{slowestHz:F0} Hz", p95, double.MaxValue));
+
+        var bins = binList.ToArray();
 
         int maxCount = 0;
         var binCounts = new int[bins.Length];
@@ -397,10 +438,10 @@ class Program
             double pct = 100.0 * binCounts[i] / intervals.Count;
             int barLen = maxCount > 0 ? (int)(35.0 * binCounts[i] / maxCount) : 0;
 
-            char barChar = i == bins.Length - 1 ? '░' : '▓';
+            char barChar = (i == 0 || i == bins.Length - 1) ? '░' : '▓';
             string bar = new string(barChar, barLen);
 
-            Console.WriteLine($"  {bins[i].Label,10} {bar.PadRight(35)} {pct,5:F1}%");
+            Console.WriteLine($"  {bins[i].Label,12} {bar.PadRight(35)} {pct,5:F1}%");
         }
 
         PrintDoubleLine(60);
@@ -598,5 +639,107 @@ class Program
 
         string bar = new string('█', barLen);
         Console.WriteLine($"  {label,7}  {bar.PadRight(barWidth)}  {count,6:N0}");
+    }
+
+    static string? UploadLog(string etlPath, string logType)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
+        Console.WriteLine("  │  Upload log to Marius for analysis?                 │");
+        Console.WriteLine("  └─────────────────────────────────────────────────────┘");
+        Console.WriteLine();
+        Console.WriteLine("    [1] Yes, upload");
+        Console.WriteLine("    [2] No, skip");
+        Console.WriteLine();
+        Console.Write("  Select: ");
+
+        string? choice = Console.ReadLine()?.Trim();
+        if (choice != "1") return null;
+
+        Console.WriteLine();
+        Console.Write("  Your nickname (Discord/name): ");
+        string? nickname = Console.ReadLine()?.Trim();
+        if (string.IsNullOrEmpty(nickname))
+        {
+            Console.WriteLine("  Skipped - no nickname provided.");
+            return null;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("  Compressing...");
+
+        // Compress the ETL file
+        string gzPath = etlPath + ".gz";
+        try
+        {
+            using (var input = File.OpenRead(etlPath))
+            using (var output = File.Create(gzPath))
+            using (var gz = new GZipStream(output, CompressionLevel.Optimal))
+            {
+                input.CopyTo(gz);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Compression failed: {ex.Message}");
+            return null;
+        }
+
+        long fileSize = new FileInfo(gzPath).Length;
+        Console.WriteLine($"  Compressed: {fileSize / 1024 / 1024} MB");
+        Console.WriteLine();
+        Console.WriteLine("  Uploading...");
+
+        try
+        {
+            using var client = new HttpClient();
+            client.Timeout = TimeSpan.FromMinutes(10);
+
+            // Get presigned URL
+            var requestBody = JsonSerializer.Serialize(new
+            {
+                nickname = nickname,
+                logType = logType,
+                fileSize = fileSize
+            });
+
+            var urlResponse = client.PostAsync(
+                "https://tools.mariusheier.com/deeppoll/upload-url",
+                new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
+            ).Result;
+
+            if (!urlResponse.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"  Failed to get upload URL: {urlResponse.StatusCode}");
+                try { File.Delete(gzPath); } catch { }
+                return null;
+            }
+
+            var urlData = JsonSerializer.Deserialize<JsonElement>(urlResponse.Content.ReadAsStringAsync().Result);
+            string uploadUrl = urlData.GetProperty("url").GetString() ?? "";
+            string logId = urlData.GetProperty("id").GetString() ?? "";
+
+            // Upload file
+            using var fileContent = new ByteArrayContent(File.ReadAllBytes(gzPath));
+            fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/gzip");
+
+            var uploadResponse = client.PutAsync(uploadUrl, fileContent).Result;
+
+            try { File.Delete(gzPath); } catch { }
+
+            if (!uploadResponse.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"  Upload failed: {uploadResponse.StatusCode}");
+                return null;
+            }
+
+            return logId;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Upload failed: {ex.Message}");
+            try { File.Delete(gzPath); } catch { }
+            return null;
+        }
     }
 }
