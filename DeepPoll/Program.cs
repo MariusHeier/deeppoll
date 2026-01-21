@@ -357,17 +357,81 @@ class Program
 
         if (interruptTx.Count == 0)
         {
-            Console.WriteLine("No interrupt transfers found in trace.");
+            Console.WriteLine("  No interrupt transfers found in trace.");
             return;
         }
 
-        // Calculate intervals
-        var sorted = interruptTx.OrderBy(t => t.EndTimestamp).ToList();
+        // Group by device handle to find unique devices
+        var deviceGroups = interruptTx
+            .GroupBy(t => t.DeviceHandle)
+            .Select(g => new {
+                Handle = g.Key,
+                Transactions = g.OrderBy(t => t.EndTimestamp).ToList(),
+                Count = g.Count()
+            })
+            .OrderByDescending(g => g.Count)
+            .ToList();
+
+        List<UsbTransaction> selectedTransactions;
+
+        if (deviceGroups.Count > 1)
+        {
+            // Multiple devices found - let user pick
+            Console.WriteLine();
+            Console.WriteLine($"  Found {deviceGroups.Count} active devices:");
+            Console.WriteLine();
+
+            for (int i = 0; i < deviceGroups.Count; i++)
+            {
+                var grp = deviceGroups[i];
+                // Estimate Hz from this device's data
+                double estHz = 0;
+                if (grp.Count > 1)
+                {
+                    var txList = grp.Transactions;
+                    var gaps = new List<double>();
+                    for (int j = 1; j < txList.Count; j++)
+                    {
+                        double gap = (txList[j].EndTimestamp - txList[j - 1].EndTimestamp) * 1000;
+                        if (gap > 0 && gap < 50000) gaps.Add(gap);
+                    }
+                    if (gaps.Count > 0) estHz = 1000000.0 / gaps.Average();
+                }
+                Console.WriteLine($"    [{i + 1}] Device {i + 1} - {grp.Count:N0} samples (~{estHz:F0} Hz)");
+            }
+
+            Console.WriteLine();
+            Console.Write("  Select: ");
+            string? choice = Console.ReadLine()?.Trim();
+
+            int selectedIdx = 0;
+            if (int.TryParse(choice, out int parsed) && parsed >= 1 && parsed <= deviceGroups.Count)
+            {
+                selectedIdx = parsed - 1;
+            }
+
+            selectedTransactions = deviceGroups[selectedIdx].Transactions;
+            Console.WriteLine();
+        }
+        else
+        {
+            // Only one device
+            selectedTransactions = deviceGroups[0].Transactions;
+        }
+
+        // Calculate intervals for selected device
+        var sorted = selectedTransactions;
         var intervals = new List<double>();
         for (int i = 1; i < sorted.Count; i++)
         {
             double interval = (sorted[i].EndTimestamp - sorted[i - 1].EndTimestamp) * 1000;
             if (interval > 0 && interval < 50000) intervals.Add(interval);
+        }
+
+        if (intervals.Count == 0)
+        {
+            Console.WriteLine("  Not enough data to calculate poll rate.");
+            return;
         }
 
         var sortedIntervals = intervals.OrderBy(x => x).ToList();
