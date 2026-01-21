@@ -29,6 +29,8 @@ class UsbTransaction
 
 class Program
 {
+    const string VERSION = "1.0.10";
+
     const string BOX_TL = "┌";
     const string BOX_TR = "┐";
     const string BOX_BL = "└";
@@ -77,7 +79,7 @@ class Program
         Console.WriteLine();
         PrintDoubleLine(60);
         PrintCentered("D E E P P O L L", 60);
-        PrintCentered("USB Polling Analyzer", 60);
+        PrintCentered($"USB Polling Analyzer  v{VERSION}", 60);
         PrintDoubleLine(60);
         Console.WriteLine();
         Console.WriteLine("  Measures USB polling rate with microsecond precision");
