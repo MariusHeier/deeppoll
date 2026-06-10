@@ -29,7 +29,7 @@ class UsbTransaction
 
 class Program
 {
-    const string VERSION = "1.1.1";
+    const string VERSION = "1.1.2";
 
     // Known MH devices. Gaming series is what poll checks target;
     // setup-mode PIDs are recognized only to tell the user to switch modes.
@@ -556,10 +556,12 @@ class Program
         int gaps1ms = intervals.Count(x => x > 1000);
         int gaps5ms = intervals.Count(x => x > 5000);
 
-        // Pretty output
+        // Pretty output. Version is part of the panel because users
+        // screenshot this - it tells support exactly what they ran.
         Console.WriteLine();
         PrintDoubleLine(60);
         PrintCentered("D E E P P O L L", 60);
+        PrintCentered($"v{VERSION}", 60);
         PrintDoubleLine(60);
 
         if (selectedVidPid != "Unknown")
