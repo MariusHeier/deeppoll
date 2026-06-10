@@ -48,6 +48,20 @@ class Program
 
     static readonly string[] SetupModeVidPids = { "39AE:4000", "39AE:5000", "1209:0001" };
 
+    // USB mode per identity - the PID tells the mode directly.
+    static readonly Dictionary<string, string> DeviceModes = new()
+    {
+        ["39AE:400A"] = "XInput (gaming)",
+        ["39AE:400D"] = "XInput (gaming)",
+        ["39AE:500A"] = "XInput (gaming)",
+        ["39AE:500D"] = "XInput (gaming)",
+        ["1A86:1235"] = "XInput (gaming)",
+        ["054C:05C4"] = "PS4 emulation (gaming)",
+        ["39AE:4000"] = "WebUSB setup",
+        ["39AE:5000"] = "WebUSB setup",
+        ["1209:0001"] = "WebUSB setup",
+    };
+
     // Nominal poll rate per device; drives the "reading is below normal"
     // diagnostics gate. Diagnostics stay hidden when the reading is healthy.
     static readonly Dictionary<string, double> ExpectedRates = new()
@@ -468,7 +482,7 @@ class Program
         }
 
         // Parse ETL
-        var (interruptTx, controlTx, captureDurationMs) = ParseEtl(etlPath);
+        var (interruptTx, controlTx, captureDurationMs, deviceBIntervals) = ParseEtl(etlPath);
 
         if (interruptTx.Count == 0)
         {
@@ -564,9 +578,21 @@ class Program
         PrintCentered($"v{VERSION}", 60);
         PrintDoubleLine(60);
 
+        bool isSetupMode = SetupModeVidPids.Contains(selectedVidPid);
+
         if (selectedVidPid != "Unknown")
             Console.WriteLine($"  Device:     {DeviceDisplayName(selectedVidPid)}  [{selectedVidPid}]");
+        if (DeviceModes.TryGetValue(selectedVidPid, out var deviceMode))
+            Console.WriteLine($"  Mode:       {deviceMode}");
         Console.WriteLine($"  Poll Rate:  {pollRate:F0} Hz    Samples: {intervals.Count:N0}");
+
+        if (isSetupMode)
+        {
+            Console.WriteLine("  Note:       This board is in setup mode - it does not poll at");
+            Console.WriteLine("              a fixed rate, so this reading says nothing about");
+            Console.WriteLine("              gaming performance. Calibrate the board at");
+            Console.WriteLine("              setup.mariusheier.com, then test in Gaming mode.");
+        }
         // Diagnostics are only shown when the reading is actually off.
         // A healthy result stays clean - extra warnings on a good reading
         // just generate "is this ok?" support questions.
@@ -575,10 +601,18 @@ class Program
         bool offNominal = expectedHz > 0 && pollRate < expectedHz * 0.98;
         bool heavyStalls = stallCount > 0 && stallMs > spanMs * 0.005;
 
-        if (offNominal || heavyStalls)
+        if (!isSetupMode && (offNominal || heavyStalls))
         {
             if (offNominal)
                 Console.WriteLine($"  Expected:   {expectedHz:F0} Hz - this reading is below normal.");
+
+            // What the device's own USB descriptor asks for (MH boards are
+            // high-speed: rate = 8000 / 2^(bInterval-1)).
+            if (offNominal && deviceBIntervals.TryGetValue(selectedVidPid, out int bi) && bi > 0)
+            {
+                double cfgHz = 8000.0 / Math.Pow(2, bi - 1);
+                Console.WriteLine($"  Configured: {cfgHz:F0} Hz (USB descriptor bInterval={bi})");
+            }
 
             int spiked = 0;
             if (stallCount > 0)
@@ -687,14 +721,31 @@ class Program
         {
             PrintVerboseAnalysis(interruptTx, controlTx, intervals, sortedIntervals,
                 gaps200, gaps500, gaps1ms, gaps5ms, maxInterval);
+
+            if (deviceBIntervals.Count > 0)
+            {
+                Console.WriteLine("\nDEVICE DESCRIPTORS (fastest interrupt IN)");
+                PrintSingleLine(60);
+                foreach (var kv in deviceBIntervals)
+                {
+                    string rate = kv.Value > 0
+                        ? $"bInterval={kv.Value} ({8000.0 / Math.Pow(2, kv.Value - 1):F0} Hz at high speed)"
+                        : "no interrupt IN endpoint (bulk/setup interface)";
+                    Console.WriteLine($"  {kv.Key}  {rate}");
+                }
+            }
         }
     }
 
-    static (List<UsbTransaction> interrupt, List<UsbTransaction> control, double durationMs) ParseEtl(string etlPath)
+    static (List<UsbTransaction> interrupt, List<UsbTransaction> control, double durationMs,
+        Dictionary<string, int> deviceBIntervals) ParseEtl(string etlPath)
     {
         var pendingTransactions = new Dictionary<ulong, UsbTransaction>();
         var completedTransactions = new List<UsbTransaction>();
         var deviceVidPids = new Dictionary<ulong, (ushort Vid, ushort Pid)>();
+        // VID:PID -> fastest interrupt IN bInterval from the config descriptor
+        // (0 = config has no interrupt IN endpoint; absent = descriptor unseen)
+        var deviceBIntervals = new Dictionary<string, int>();
         double firstTimestamp = -1;
         double lastTimestamp = 0;
 
@@ -719,9 +770,14 @@ class Program
                         var m = System.Text.RegularExpressions.Regex.Match(devicePath, @"VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})");
                         if (m.Success)
                         {
-                            deviceVidPids[hubUsbDevice] = (
-                                Convert.ToUInt16(m.Groups[1].Value, 16),
-                                Convert.ToUInt16(m.Groups[2].Value, 16));
+                            ushort vid = Convert.ToUInt16(m.Groups[1].Value, 16);
+                            ushort pid = Convert.ToUInt16(m.Groups[2].Value, 16);
+                            deviceVidPids[hubUsbDevice] = (vid, pid);
+
+                            byte[]? cfg = null;
+                            try { cfg = data.PayloadByName("fid_ConfigurationDescriptor") as byte[]; } catch { }
+                            if (cfg != null && cfg.Length > 0)
+                                deviceBIntervals[$"{vid:X4}:{pid:X4}"] = FastestInterruptInBInterval(cfg);
                         }
                     }
                     return;
@@ -796,7 +852,7 @@ class Program
         var interrupt = completedTransactions.Where(t => t.Type == "Interrupt").ToList();
         var control = completedTransactions.Where(t => t.Type == "Control").ToList();
 
-        return (interrupt, control, lastTimestamp - firstTimestamp);
+        return (interrupt, control, lastTimestamp - firstTimestamp, deviceBIntervals);
     }
 
     static void PrintVerboseAnalysis(List<UsbTransaction> interruptTx, List<UsbTransaction> controlTx,
@@ -872,6 +928,31 @@ class Program
         }
 
         Console.WriteLine();
+    }
+
+    // Walk a USB configuration descriptor and return the fastest interrupt IN
+    // endpoint's bInterval. Returns 0 if the config has no interrupt IN
+    // endpoint at all (e.g. WebUSB setup mode, which is bulk-only - readings
+    // from such an interface say nothing about gaming poll rate).
+    static int FastestInterruptInBInterval(byte[] cfg)
+    {
+        int best = 0;
+        int i = 0;
+        while (i + 1 < cfg.Length)
+        {
+            int len = cfg[i];
+            if (len < 2) break;
+            if (cfg[i + 1] == 0x05 && len >= 7 && i + 6 < cfg.Length)  // endpoint descriptor
+            {
+                bool isIn = (cfg[i + 2] & 0x80) != 0;
+                bool isInterrupt = (cfg[i + 3] & 0x03) == 0x03;
+                int interval = cfg[i + 6];
+                if (isIn && isInterrupt && interval > 0 && (best == 0 || interval < best))
+                    best = interval;
+            }
+            i += len;
+        }
+        return best;
     }
 
     // Steady-state poll rate from completion intervals.
