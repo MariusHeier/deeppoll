@@ -30,6 +30,19 @@ DeepPoll uses ETW to capture USB interrupts directly from the kernel, giving you
 - Detection of missed polls and jitter
 - Accurate measurement up to 8000Hz
 
+## Supported MH Devices
+
+DeepPoll auto-detects MH gamepads (Gaming mode):
+
+| Device | Analog    | Digital   |
+|--------|-----------|-----------|
+| MH4    | 39AE:400A | 39AE:400D |
+| MH5    | 39AE:500A | 39AE:500D |
+
+Setup mode (39AE:4000 / 39AE:5000) is recognized but not used for poll
+checks — switch the board to Gaming mode first. Any other USB device can
+be measured via the "Other USB Device" option.
+
 ## Requirements
 
 - Windows 10/11

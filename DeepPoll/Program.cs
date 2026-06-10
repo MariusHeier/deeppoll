@@ -29,7 +29,48 @@ class UsbTransaction
 
 class Program
 {
-    const string VERSION = "1.0.10";
+    const string VERSION = "1.1.0";
+
+    // Known MH devices. Gaming series is what poll checks target;
+    // setup-mode PIDs are recognized only to tell the user to switch modes.
+    static readonly Dictionary<string, string> KnownDevices = new()
+    {
+        ["39AE:400A"] = "MH4 Gamepad (Analog)",
+        ["39AE:400D"] = "MH4 Gamepad (Digital)",
+        ["39AE:500A"] = "MH5 Gamepad (Analog)",
+        ["39AE:500D"] = "MH5 Gamepad (Digital)",
+        ["054C:05C4"] = "MH4 Gamepad (Legacy)",
+        ["39AE:4000"] = "MH4 Gamepad (Setup Mode)",
+        ["39AE:5000"] = "MH5 Gamepad (Setup Mode)",
+    };
+
+    static readonly string[] SetupModeVidPids = { "39AE:4000", "39AE:5000" };
+
+    const string GamepadFilter = "39AE:400A,39AE:400D,39AE:500A,39AE:500D,054C:05C4";
+
+    static string DeviceDisplayName(string vidPid) =>
+        KnownDevices.TryGetValue(vidPid, out var name) ? name : vidPid;
+
+    static List<string> DetectMHDevices()
+    {
+        var found = new List<string>();
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT PNPDeviceID FROM Win32_PnPEntity WHERE " +
+                "PNPDeviceID LIKE 'USB\\\\VID_39AE%' OR PNPDeviceID LIKE 'USB\\\\VID_054C&PID_05C4%'");
+            foreach (var obj in searcher.Get())
+            {
+                string id = obj["PNPDeviceID"]?.ToString() ?? "";
+                var m = System.Text.RegularExpressions.Regex.Match(id, @"VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})");
+                if (!m.Success) continue;
+                string vidPid = $"{m.Groups[1].Value.ToUpper()}:{m.Groups[2].Value.ToUpper()}";
+                if (!found.Contains(vidPid)) found.Add(vidPid);
+            }
+        }
+        catch { }
+        return found;
+    }
 
     const string BOX_TL = "┌";
     const string BOX_TR = "┐";
@@ -87,24 +128,36 @@ class Program
         Console.WriteLine();
         PrintSingleLine(60);
         Console.WriteLine();
+        var detected = DetectMHDevices();
+        var gaming = detected.Where(d => !SetupModeVidPids.Contains(d)).ToList();
+
         Console.WriteLine("  What device?");
         Console.WriteLine();
-        Console.WriteLine("    [1] MH4 Gamepad");
+        if (gaming.Count > 0)
+            Console.WriteLine($"    [1] {DeviceDisplayName(gaming[0])}  (detected)");
+        else
+            Console.WriteLine("    [1] MH4 / MH5 Gamepad");
         Console.WriteLine("    [2] Other USB Device");
+        if (gaming.Count == 0 && detected.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"    Note: {DeviceDisplayName(detected[0])} found.");
+            Console.WriteLine("    Switch the board to Gaming mode to check poll rate.");
+        }
         Console.WriteLine();
         Console.Write("  Select: ");
 
         string? choice = Console.ReadLine()?.Trim();
-        bool isMH4 = choice == "1";
+        bool isGamepad = choice == "1";
 
-        if (!isMH4)
+        if (!isGamepad)
         {
             // Other USB device - capture and let user select from found devices
             RunPollCheck(verbose, null);
             return;
         }
 
-        // MH4 - more options
+        // MH4/MH5 - more options
         Console.WriteLine();
         PrintSingleLine(60);
         Console.WriteLine();
@@ -119,7 +172,7 @@ class Program
 
         if (choice == "1")
         {
-            RunPollCheck(verbose, "054C:05C4", 20);
+            RunPollCheck(verbose, GamepadFilter, 20);
             return;
         }
 
@@ -180,7 +233,7 @@ class Program
     {
         Console.WriteLine();
         Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
-        Console.WriteLine("  │  UNPLUG your MH4 controller now.                    │");
+        Console.WriteLine("  │  UNPLUG your MH4/MH5 controller now.                │");
         Console.WriteLine("  │                                                     │");
         Console.WriteLine("  │  Press ENTER when ready, then plug it in.           │");
         Console.WriteLine("  └─────────────────────────────────────────────────────┘");
@@ -197,7 +250,7 @@ class Program
         Console.WriteLine("  Processing...");
         Console.WriteLine();
 
-        AnalyzeEtl(etlPath, false, "054C:05C4");
+        AnalyzeEtl(etlPath, false, GamepadFilter);
 
         string? logId = UploadLog(etlPath, "startup");
         if (logId != null)
@@ -231,7 +284,7 @@ class Program
 
         Console.WriteLine();
         Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
-        Console.WriteLine("  │  Make sure your MH4 is connected.                   │");
+        Console.WriteLine("  │  Make sure your MH4/MH5 is connected.               │");
         Console.WriteLine("  │                                                     │");
         Console.WriteLine("  │  Press ENTER to start logging.                      │");
         Console.WriteLine("  │  Press ENTER again when disconnect happens.         │");
@@ -243,7 +296,9 @@ class Program
 
         // Start capture in background
         RunCommand("logman", "stop deeppoll -ets", silent: true);
-        RunCommand("logman", $"start deeppoll -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -ets");
+        RunCommand("logman", $"start deeppoll -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -nb 64 256 -bs 512 -ets");
+        // USBHUB3 rundown events identify connected devices (VID:PID per device handle)
+        RunCommand("logman", "update deeppoll -p Microsoft-Windows-USB-USBHUB3 -ets");
 
         Console.WriteLine();
         Console.WriteLine("  Logging... Press ENTER when disconnect happens.");
@@ -267,7 +322,7 @@ class Program
         Console.WriteLine("  Processing...");
         Console.WriteLine();
 
-        AnalyzeEtl(etlPath, false, "054C:05C4");
+        AnalyzeEtl(etlPath, false, GamepadFilter);
 
         string? logId = UploadLog(etlPath, "disconnect");
         if (logId != null)
@@ -291,8 +346,13 @@ class Program
         // Stop any existing trace
         RunCommand("logman", "stop usbpollcap -ets", silent: true);
 
-        // Start new trace
-        RunCommand("logman", $"start usbpollcap -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -ets");
+        // Start new trace. Explicit large buffers: at 8 kHz a single device emits
+        // ~16k events/s and default buffer settings silently drop events under load,
+        // which reads as a lower poll rate.
+        RunCommand("logman", $"start usbpollcap -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -nb 64 256 -bs 512 -ets");
+
+        // USBHUB3 rundown events identify connected devices (VID:PID per device handle)
+        RunCommand("logman", "update usbpollcap -p Microsoft-Windows-USB-USBHUB3 -ets");
 
         // Wait
         Thread.Sleep(seconds * 1000);
@@ -357,19 +417,7 @@ class Program
                 var withVidPid = txList.FirstOrDefault(t => t.VendorId > 0);
                 string vidPid = withVidPid?.VidPid ?? "Unknown";
 
-                // Estimate poll rate from average interval
-                double avgIntervalUs = 0;
-                if (txList.Count > 1)
-                {
-                    var intervals = new List<double>();
-                    for (int i = 1; i < txList.Count; i++)
-                    {
-                        double interval = (txList[i].EndTimestamp - txList[i - 1].EndTimestamp) * 1000;
-                        if (interval > 0 && interval < 50000) intervals.Add(interval);
-                    }
-                    if (intervals.Count > 0) avgIntervalUs = intervals.Average();
-                }
-                double estimatedHz = avgIntervalUs > 0 ? 1000000.0 / avgIntervalUs : 0;
+                double estimatedHz = ComputePollRate(txList).RateHz;
 
                 return new {
                     Handle = g.Key,
@@ -382,29 +430,19 @@ class Program
             .OrderByDescending(g => g.Count)
             .ToList();
 
-        List<UsbTransaction> selectedTransactions;
+        var selectedGroup = deviceGroups[0];
 
-        // If filterDevice specified, try to use that
+        // If filterDevice specified (comma-separated VID:PIDs), try to use that
         if (!string.IsNullOrEmpty(filterDevice))
         {
-            var filtered = deviceGroups.FirstOrDefault(g => g.VidPid == filterDevice);
-            if (filtered != null)
-            {
-                selectedTransactions = filtered.Transactions;
-            }
-            else
-            {
-                // VID:PID not in ETL data - auto-select device with most samples
-                selectedTransactions = deviceGroups[0].Transactions;
-            }
+            var filters = filterDevice.Split(',');
+            var filtered = deviceGroups.FirstOrDefault(g => filters.Contains(g.VidPid));
+            // VID:PID not in ETL data - fall back to device with most samples
+            if (filtered != null) selectedGroup = filtered;
         }
-        // If only one device, auto-select
-        else if (deviceGroups.Count == 1)
-        {
-            selectedTransactions = deviceGroups[0].Transactions;
-        }
+        // If only one device, auto-select (selectedGroup already set)
         // Multiple devices - let user select
-        else
+        else if (deviceGroups.Count > 1)
         {
             Console.WriteLine();
             Console.WriteLine("  Found devices:");
@@ -413,7 +451,7 @@ class Program
             {
                 var g = deviceGroups[i];
                 string hzStr = g.EstimatedHz > 0 ? $"~{g.EstimatedHz:F0} Hz" : "";
-                Console.WriteLine($"    [{i + 1}] {g.VidPid,-12} {g.Count,6:N0} samples  {hzStr}");
+                Console.WriteLine($"    [{i + 1}] {DeviceDisplayName(g.VidPid),-26} {g.Count,6:N0} samples  {hzStr}");
             }
             Console.WriteLine();
             Console.Write("  Select: ");
@@ -425,17 +463,15 @@ class Program
                 return;
             }
 
-            selectedTransactions = deviceGroups[idx - 1].Transactions;
+            selectedGroup = deviceGroups[idx - 1];
         }
+
+        List<UsbTransaction> selectedTransactions = selectedGroup.Transactions;
+        string selectedVidPid = selectedGroup.VidPid;
 
         // Calculate intervals for selected device
         var sorted = selectedTransactions;
-        var intervals = new List<double>();
-        for (int i = 1; i < sorted.Count; i++)
-        {
-            double interval = (sorted[i].EndTimestamp - sorted[i - 1].EndTimestamp) * 1000;
-            if (interval > 0 && interval < 50000) intervals.Add(interval);
-        }
+        var (pollRate, intervals, stallCount, stallMs, stallThresholdUs) = ComputePollRate(sorted);
 
         if (intervals.Count == 0)
         {
@@ -444,13 +480,6 @@ class Program
         }
 
         var sortedIntervals = intervals.OrderBy(x => x).ToList();
-
-        // Calculate stats
-        double pollRate = 1000000.0 / intervals.Average();
-        double p50 = Percentile(sortedIntervals, 50);
-        double p90 = Percentile(sortedIntervals, 90);
-        double p99 = Percentile(sortedIntervals, 99);
-        double p999 = Percentile(sortedIntervals, 99.9);
         double maxInterval = sortedIntervals.Last();
 
         int gaps200 = intervals.Count(x => x > 200);
@@ -464,15 +493,21 @@ class Program
         PrintCentered("D E E P P O L L", 60);
         PrintDoubleLine(60);
 
+        if (selectedVidPid != "Unknown")
+            Console.WriteLine($"  Device:     {DeviceDisplayName(selectedVidPid)}  [{selectedVidPid}]");
         Console.WriteLine($"  Poll Rate:  {pollRate:F0} Hz    Samples: {intervals.Count:N0}");
+        if (stallCount > 0)
+            Console.WriteLine($"  Stalls:     {stallCount} gap(s) > {stallThresholdUs / 1000.0:F1} ms excluded ({stallMs:F0} ms total)");
         Console.WriteLine();
         Console.WriteLine("  Timing Distribution:");
         Console.WriteLine();
 
-        // Auto-bin based on data range
-        double medianUs = Percentile(sortedIntervals, 50);
-        double p5 = Percentile(sortedIntervals, 5);
-        double p95 = Percentile(sortedIntervals, 95);
+        // Auto-bin based on data range (zero-length intervals excluded from display)
+        var distIntervals = sortedIntervals.Where(x => x > 0).ToList();
+        if (distIntervals.Count == 0) distIntervals = sortedIntervals;
+        double medianUs = Percentile(distIntervals, 50);
+        double p5 = Percentile(distIntervals, 5);
+        double p95 = Percentile(distIntervals, 95);
 
         // Create 8 bins covering most of the data (p5 to p95)
         double binWidth = (p95 - p5) / 6.0;
@@ -534,6 +569,7 @@ class Program
     {
         var pendingTransactions = new Dictionary<ulong, UsbTransaction>();
         var completedTransactions = new List<UsbTransaction>();
+        var deviceVidPids = new Dictionary<ulong, (ushort Vid, ushort Pid)>();
         double firstTimestamp = -1;
         double lastTimestamp = 0;
 
@@ -543,6 +579,28 @@ class Program
             {
                 string provider = data.ProviderName ?? "";
                 string eventName = data.EventName ?? "";
+
+                if (provider.Contains("USBHUB3"))
+                {
+                    // Hub rundown/device events carry the same fid_UsbDevice handle
+                    // that UCX transfer events are grouped by, plus the device path
+                    // with VID/PID. This is the only reliable handle->device mapping.
+                    ulong hubUsbDevice = 0;
+                    string devicePath = "";
+                    try { hubUsbDevice = Convert.ToUInt64(data.PayloadByName("fid_UsbDevice")); } catch { }
+                    try { devicePath = data.PayloadByName("fid_DeviceInterfacePath")?.ToString() ?? ""; } catch { }
+                    if (hubUsbDevice != 0 && devicePath.Length > 0)
+                    {
+                        var m = System.Text.RegularExpressions.Regex.Match(devicePath, @"VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})");
+                        if (m.Success)
+                        {
+                            deviceVidPids[hubUsbDevice] = (
+                                Convert.ToUInt16(m.Groups[1].Value, 16),
+                                Convert.ToUInt16(m.Groups[2].Value, 16));
+                        }
+                    }
+                    return;
+                }
 
                 if (!provider.Contains("USB-UCX")) return;
 
@@ -598,6 +656,16 @@ class Program
             };
 
             source.Process();
+        }
+
+        // Fill in VID:PID from the hub device map (transfer events don't carry it)
+        foreach (var tx in completedTransactions)
+        {
+            if (tx.VendorId == 0 && deviceVidPids.TryGetValue(tx.DeviceHandle, out var vp))
+            {
+                tx.VendorId = vp.Vid;
+                tx.ProductId = vp.Pid;
+            }
         }
 
         var interrupt = completedTransactions.Where(t => t.Type == "Interrupt").ToList();
@@ -679,6 +747,35 @@ class Program
         }
 
         Console.WriteLine();
+    }
+
+    // Steady-state poll rate from completion intervals.
+    // - Zero-length intervals are real completions (batched DPC delivery on some
+    //   xHCI/timer configurations) and must be counted, not filtered.
+    // - Host-side stalls (DPC storms, driver warmup) pause the whole bus for
+    //   milliseconds; excluding them keeps the headline number at what the
+    //   device actually sustains. They are reported separately.
+    static (double RateHz, List<double> Intervals, int StallCount, double StallMs, double ThresholdUs)
+        ComputePollRate(List<UsbTransaction> txSorted)
+    {
+        var all = new List<double>();
+        for (int i = 1; i < txSorted.Count; i++)
+        {
+            double interval = (txSorted[i].EndTimestamp - txSorted[i - 1].EndTimestamp) * 1000;
+            if (interval >= 0 && interval < 50000) all.Add(interval);
+        }
+        if (all.Count == 0) return (0, all, 0, 0, 0);
+
+        double median = Percentile(all.OrderBy(x => x).ToList(), 50);
+        double thresholdUs = Math.Max(4 * median, 1000);
+
+        var steady = all.Where(x => x < thresholdUs).ToList();
+        int stallCount = all.Count - steady.Count;
+        double stallMs = all.Where(x => x >= thresholdUs).Sum() / 1000.0;
+
+        double avgUs = steady.Count > 0 ? steady.Average() : 0;
+        double rate = avgUs > 0 ? 1000000.0 / avgUs : 0;
+        return (rate, all, stallCount, stallMs, thresholdUs);
     }
 
     static double Percentile(List<double> sorted, double p)
