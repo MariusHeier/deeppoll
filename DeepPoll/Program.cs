@@ -406,11 +406,11 @@ class Program
         // twice a second has no measurable effect on USB completion timing.
         var cpuTimeline = new List<(double TimeMs, double BusyPct)>();
         var prev = ReadCpuRaw();
-        int elapsedMs = 0;
-        while (elapsedMs < seconds * 1000)
+        // Wall-clock based so WMI sampling time doesn't stretch the capture
+        double captureStartMs = sw.Elapsed.TotalMilliseconds;
+        while (sw.Elapsed.TotalMilliseconds - captureStartMs < seconds * 1000)
         {
             Thread.Sleep(500);
-            elapsedMs += 500;
             var cur = ReadCpuRaw();
             double busy = CpuBusyPercent(prev, cur);
             if (busy >= 0) cpuTimeline.Add((sw.Elapsed.TotalMilliseconds, busy));
