@@ -29,7 +29,7 @@ class UsbTransaction
 
 class Program
 {
-    const string VERSION = "1.1.2";
+    const string VERSION = "1.1.3";
 
     // Known MH devices. Gaming series is what poll checks target;
     // setup-mode PIDs are recognized only to tell the user to switch modes.
@@ -580,6 +580,7 @@ class Program
             if (offNominal)
                 Console.WriteLine($"  Expected:   {expectedHz:F0} Hz - this reading is below normal.");
 
+            int spiked = 0;
             if (stallCount > 0)
             {
                 Console.WriteLine($"  Stalls:     {stallCount} gap(s) > {stallThresholdUs / 1000.0:F1} ms excluded ({stallMs:F0} ms total)");
@@ -589,7 +590,7 @@ class Program
                 // clock and the sampler's stopwatch.
                 if (cpuTimeline != null && cpuTimeline.Count > 0)
                 {
-                    int spiked = stalls.Count(s => cpuTimeline.Any(c =>
+                    spiked = stalls.Count(s => cpuTimeline.Any(c =>
                         Math.Abs(c.TimeMs - s.AtMs) <= 1000 && c.BusyPct >= 80));
                     if (spiked > 0)
                     {
@@ -599,17 +600,28 @@ class Program
                 }
             }
 
+            double avgBusy = -1;
             if (cpuTimeline != null && cpuTimeline.Count > 0)
             {
-                double avgBusy = cpuTimeline.Average(c => c.BusyPct);
+                avgBusy = cpuTimeline.Average(c => c.BusyPct);
                 double peakBusy = cpuTimeline.Max(c => c.BusyPct);
                 if (avgBusy >= 50)
                     Console.WriteLine($"  System:     CPU {avgBusy:F0}% busy during capture (peak {peakBusy:F0}%).");
             }
 
-            Console.WriteLine("  Tip:        Background apps and power saving add jitter.");
-            Console.WriteLine("              Close other apps, set the Windows power plan to");
-            Console.WriteLine("              'High performance', then run the check again.");
+            // Only blame the user's system when the capture actually implicates
+            // it (busy CPU or spike-correlated stalls). If the system looks
+            // fine, say nothing about it - a below-normal reading on a quiet
+            // system points at the device, not their PC.
+            bool systemImplicated = cpuTimeline != null && cpuTimeline.Count > 0
+                ? (avgBusy >= 50 || spiked > 0)
+                : stallCount > 0;
+            if (systemImplicated)
+            {
+                Console.WriteLine("  Tip:        Background apps and power saving add jitter.");
+                Console.WriteLine("              Close other apps, set the Windows power plan to");
+                Console.WriteLine("              'High performance', then run the check again.");
+            }
         }
         Console.WriteLine();
         Console.WriteLine("  Timing Distribution:");
