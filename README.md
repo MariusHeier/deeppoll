@@ -38,9 +38,13 @@ DeepPoll auto-detects MH gamepads (Gaming mode):
 |--------|-----------|-----------|
 | MH4    | 39AE:400A | 39AE:400D |
 | MH5    | 39AE:500A | 39AE:500D |
+| MH-XSX / XInput v1.0 firmware | 1A86:1235 | — |
 
-Setup mode (39AE:4000 / 39AE:5000) is recognized but not used for poll
-checks — switch the board to Gaming mode first. Any other USB device can
+Legacy MH4 units (054C:05C4) are also recognized.
+
+Setup mode (39AE:4000 / 39AE:5000 / 1209:0001 WebUSB) is recognized but
+not used for poll checks — calibrate the board at setup.mariusheier.com
+first; it switches to Gaming mode when done. Any other USB device can
 be measured via the "Other USB Device" option.
 
 ## Requirements

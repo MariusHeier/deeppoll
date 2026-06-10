@@ -29,7 +29,7 @@ class UsbTransaction
 
 class Program
 {
-    const string VERSION = "1.1.0";
+    const string VERSION = "1.1.1";
 
     // Known MH devices. Gaming series is what poll checks target;
     // setup-mode PIDs are recognized only to tell the user to switch modes.
@@ -40,11 +40,13 @@ class Program
         ["39AE:500A"] = "MH5 Gamepad (Analog)",
         ["39AE:500D"] = "MH5 Gamepad (Digital)",
         ["054C:05C4"] = "MH4 Gamepad (Legacy)",
+        ["1A86:1235"] = "MH-XSX / XInput v1.0",
         ["39AE:4000"] = "MH4 Gamepad (Setup Mode)",
         ["39AE:5000"] = "MH5 Gamepad (Setup Mode)",
+        ["1209:0001"] = "MH Gamepad (Setup Mode)",
     };
 
-    static readonly string[] SetupModeVidPids = { "39AE:4000", "39AE:5000" };
+    static readonly string[] SetupModeVidPids = { "39AE:4000", "39AE:5000", "1209:0001" };
 
     // Nominal poll rate per device; drives the "reading is below normal"
     // diagnostics gate. Diagnostics stay hidden when the reading is healthy.
@@ -55,9 +57,10 @@ class Program
         ["39AE:500A"] = 8000,
         ["39AE:500D"] = 8000,
         ["054C:05C4"] = 8000,
+        ["1A86:1235"] = 8000,
     };
 
-    const string GamepadFilter = "39AE:400A,39AE:400D,39AE:500A,39AE:500D,054C:05C4";
+    const string GamepadFilter = "39AE:400A,39AE:400D,39AE:500A,39AE:500D,054C:05C4,1A86:1235";
 
     static string DeviceDisplayName(string vidPid) =>
         KnownDevices.TryGetValue(vidPid, out var name) ? name : vidPid;
@@ -92,7 +95,8 @@ class Program
         {
             using var searcher = new ManagementObjectSearcher(
                 "SELECT PNPDeviceID FROM Win32_PnPEntity WHERE " +
-                "PNPDeviceID LIKE 'USB\\\\VID_39AE%' OR PNPDeviceID LIKE 'USB\\\\VID_054C&PID_05C4%'");
+                "PNPDeviceID LIKE 'USB\\\\VID_39AE%' OR PNPDeviceID LIKE 'USB\\\\VID_054C&PID_05C4%' OR " +
+                "PNPDeviceID LIKE 'USB\\\\VID_1A86&PID_1235%' OR PNPDeviceID LIKE 'USB\\\\VID_1209&PID_0001%'");
             foreach (var obj in searcher.Get())
             {
                 string id = obj["PNPDeviceID"]?.ToString() ?? "";
@@ -176,7 +180,8 @@ class Program
         {
             Console.WriteLine();
             Console.WriteLine($"    Note: {DeviceDisplayName(detected[0])} found.");
-            Console.WriteLine("    Switch the board to Gaming mode to check poll rate.");
+            Console.WriteLine("    Calibrate it at setup.mariusheier.com first -");
+            Console.WriteLine("    the board switches to Gaming mode when done.");
         }
         Console.WriteLine();
         Console.Write("  Select: ");
