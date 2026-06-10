@@ -46,6 +46,17 @@ class Program
 
     static readonly string[] SetupModeVidPids = { "39AE:4000", "39AE:5000" };
 
+    // Nominal poll rate per device; drives the "reading is below normal"
+    // diagnostics gate. Diagnostics stay hidden when the reading is healthy.
+    static readonly Dictionary<string, double> ExpectedRates = new()
+    {
+        ["39AE:400A"] = 8000,
+        ["39AE:400D"] = 8000,
+        ["39AE:500A"] = 8000,
+        ["39AE:500D"] = 8000,
+        ["054C:05C4"] = 8000,
+    };
+
     const string GamepadFilter = "39AE:400A,39AE:400D,39AE:500A,39AE:500D,054C:05C4";
 
     static string DeviceDisplayName(string vidPid) =>
@@ -243,12 +254,12 @@ class Program
         Console.WriteLine($"  Capturing for {durationSeconds} seconds...");
         Console.WriteLine();
 
-        double cpuBusy = StartEtwCapture(etlPath, durationSeconds);
+        var cpuTimeline = StartEtwCapture(etlPath, durationSeconds);
 
         Console.WriteLine("  Processing...");
         Console.WriteLine();
 
-        AnalyzeEtl(etlPath, verbose, deviceFilter, cpuBusy);
+        AnalyzeEtl(etlPath, verbose, deviceFilter, cpuTimeline);
         try { File.Delete(etlPath); } catch { }
     }
 
@@ -268,12 +279,12 @@ class Program
         Console.WriteLine("  Plug in now! Capturing for 20 seconds...");
         Console.WriteLine();
 
-        double cpuBusy = StartEtwCapture(etlPath, 20);
+        var cpuTimeline = StartEtwCapture(etlPath, 20);
 
         Console.WriteLine("  Processing...");
         Console.WriteLine();
 
-        AnalyzeEtl(etlPath, false, GamepadFilter, cpuBusy);
+        AnalyzeEtl(etlPath, false, GamepadFilter, cpuTimeline);
 
         string? logId = UploadLog(etlPath, "startup");
         if (logId != null)
@@ -319,27 +330,31 @@ class Program
 
         // Start capture in background
         RunCommand("logman", "stop deeppoll -ets", silent: true);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         RunCommand("logman", $"start deeppoll -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -nb 64 256 -bs 512 -ct perf -ets");
         // USBHUB3 rundown events identify connected devices (VID:PID per device handle)
         RunCommand("logman", "update deeppoll -p Microsoft-Windows-USB-USBHUB3 -ets");
-
-        var cpuStart = ReadCpuRaw();
 
         Console.WriteLine();
         Console.WriteLine("  Logging... Press ENTER when disconnect happens.");
         Console.WriteLine();
 
-        // Wait for user or timeout (30 min)
+        // Wait for user or timeout (30 min), sampling CPU load each second
+        var cpuTimeline = new List<(double TimeMs, double BusyPct)>();
+        var prevCpu = ReadCpuRaw();
         var startTime = DateTime.Now;
         while (!Console.KeyAvailable && (DateTime.Now - startTime).TotalMinutes < 30)
         {
             var elapsed = DateTime.Now - startTime;
             Console.Write($"\r  Recording: {elapsed:mm\\:ss}  ");
             Thread.Sleep(1000);
+
+            var curCpu = ReadCpuRaw();
+            double busy = CpuBusyPercent(prevCpu, curCpu);
+            if (busy >= 0) cpuTimeline.Add((sw.Elapsed.TotalMilliseconds, busy));
+            prevCpu = curCpu;
         }
         Console.ReadKey(true); // consume the key
-
-        double cpuBusy = CpuBusyPercent(cpuStart, ReadCpuRaw());
 
         // Stop capture
         RunCommand("logman", "stop deeppoll -ets");
@@ -349,7 +364,7 @@ class Program
         Console.WriteLine("  Processing...");
         Console.WriteLine();
 
-        AnalyzeEtl(etlPath, false, GamepadFilter, cpuBusy);
+        AnalyzeEtl(etlPath, false, GamepadFilter, cpuTimeline);
 
         string? logId = UploadLog(etlPath, "disconnect");
         if (logId != null)
@@ -368,10 +383,14 @@ class Program
         try { File.Delete(etlPath); } catch { }
     }
 
-    static double StartEtwCapture(string etlPath, int seconds)
+    static List<(double TimeMs, double BusyPct)> StartEtwCapture(string etlPath, int seconds)
     {
         // Stop any existing trace
         RunCommand("logman", "stop usbpollcap -ets", silent: true);
+
+        // Stopwatch anchored just before session start so CPU samples share the
+        // trace's time axis (within command startup latency).
+        var sw = System.Diagnostics.Stopwatch.StartNew();
 
         // Start new trace. Explicit large buffers: at 8 kHz a single device emits
         // ~16k events/s and default buffer settings silently drop events under load,
@@ -382,17 +401,26 @@ class Program
         // USBHUB3 rundown events identify connected devices (VID:PID per device handle)
         RunCommand("logman", "update usbpollcap -p Microsoft-Windows-USB-USBHUB3 -ets");
 
-        var cpuStart = ReadCpuRaw();
-
-        // Wait
-        Thread.Sleep(seconds * 1000);
-
-        double cpuBusy = CpuBusyPercent(cpuStart, ReadCpuRaw());
+        // Sample system CPU load every 500ms alongside the capture so stalls in
+        // the USB data can be correlated with load spikes. Reading two counters
+        // twice a second has no measurable effect on USB completion timing.
+        var cpuTimeline = new List<(double TimeMs, double BusyPct)>();
+        var prev = ReadCpuRaw();
+        int elapsedMs = 0;
+        while (elapsedMs < seconds * 1000)
+        {
+            Thread.Sleep(500);
+            elapsedMs += 500;
+            var cur = ReadCpuRaw();
+            double busy = CpuBusyPercent(prev, cur);
+            if (busy >= 0) cpuTimeline.Add((sw.Elapsed.TotalMilliseconds, busy));
+            prev = cur;
+        }
 
         // Stop trace
         RunCommand("logman", "stop usbpollcap -ets");
 
-        return cpuBusy;
+        return cpuTimeline;
     }
 
     static int CountUsbDevices()
@@ -425,7 +453,8 @@ class Program
         proc?.WaitForExit();
     }
 
-    static void AnalyzeEtl(string etlPath, bool verbose, string? filterDevice = null, double cpuBusyPct = -1)
+    static void AnalyzeEtl(string etlPath, bool verbose, string? filterDevice = null,
+        List<(double TimeMs, double BusyPct)>? cpuTimeline = null)
     {
         if (!File.Exists(etlPath))
         {
@@ -505,7 +534,8 @@ class Program
 
         // Calculate intervals for selected device
         var sorted = selectedTransactions;
-        var (pollRate, intervals, stallCount, stallMs, stallThresholdUs) = ComputePollRate(sorted);
+        var (pollRate, intervals, stalls, stallMs, stallThresholdUs) = ComputePollRate(sorted);
+        int stallCount = stalls.Count;
 
         if (intervals.Count == 0)
         {
@@ -530,13 +560,49 @@ class Program
         if (selectedVidPid != "Unknown")
             Console.WriteLine($"  Device:     {DeviceDisplayName(selectedVidPid)}  [{selectedVidPid}]");
         Console.WriteLine($"  Poll Rate:  {pollRate:F0} Hz    Samples: {intervals.Count:N0}");
-        if (stallCount > 0)
-            Console.WriteLine($"  Stalls:     {stallCount} gap(s) > {stallThresholdUs / 1000.0:F1} ms excluded ({stallMs:F0} ms total)");
-        if (cpuBusyPct >= 50)
+        // Diagnostics are only shown when the reading is actually off.
+        // A healthy result stays clean - extra warnings on a good reading
+        // just generate "is this ok?" support questions.
+        double expectedHz = ExpectedRates.TryGetValue(selectedVidPid, out var exp) ? exp : 0;
+        double spanMs = intervals.Sum() / 1000.0;
+        bool offNominal = expectedHz > 0 && pollRate < expectedHz * 0.98;
+        bool heavyStalls = stallCount > 0 && stallMs > spanMs * 0.005;
+
+        if (offNominal || heavyStalls)
         {
-            Console.WriteLine($"  System:     CPU was {cpuBusyPct:F0}% busy during capture.");
-            Console.WriteLine("              Background load adds jitter - close apps and re-run");
-            Console.WriteLine("              for a cleaner reading.");
+            if (offNominal)
+                Console.WriteLine($"  Expected:   {expectedHz:F0} Hz - this reading is below normal.");
+
+            if (stallCount > 0)
+            {
+                Console.WriteLine($"  Stalls:     {stallCount} gap(s) > {stallThresholdUs / 1000.0:F1} ms excluded ({stallMs:F0} ms total)");
+
+                // Correlate stalls with CPU spikes sampled during the capture.
+                // +-1s tolerance covers the alignment slack between the trace
+                // clock and the sampler's stopwatch.
+                if (cpuTimeline != null && cpuTimeline.Count > 0)
+                {
+                    int spiked = stalls.Count(s => cpuTimeline.Any(c =>
+                        Math.Abs(c.TimeMs - s.AtMs) <= 1000 && c.BusyPct >= 80));
+                    if (spiked > 0)
+                    {
+                        Console.WriteLine($"              {spiked} of {stallCount} during CPU spikes (>80% busy)");
+                        Console.WriteLine("              - caused by system load, not the device.");
+                    }
+                }
+            }
+
+            if (cpuTimeline != null && cpuTimeline.Count > 0)
+            {
+                double avgBusy = cpuTimeline.Average(c => c.BusyPct);
+                double peakBusy = cpuTimeline.Max(c => c.BusyPct);
+                if (avgBusy >= 50)
+                    Console.WriteLine($"  System:     CPU {avgBusy:F0}% busy during capture (peak {peakBusy:F0}%).");
+            }
+
+            Console.WriteLine("  Tip:        Background apps and power saving add jitter.");
+            Console.WriteLine("              Close other apps, set the Windows power plan to");
+            Console.WriteLine("              'High performance', then run the check again.");
         }
         Console.WriteLine();
         Console.WriteLine("  Timing Distribution:");
@@ -795,27 +861,32 @@ class Program
     // - Host-side stalls (DPC storms, driver warmup) pause the whole bus for
     //   milliseconds; excluding them keeps the headline number at what the
     //   device actually sustains. They are reported separately.
-    static (double RateHz, List<double> Intervals, int StallCount, double StallMs, double ThresholdUs)
+    static (double RateHz, List<double> Intervals, List<(double IntervalUs, double AtMs)> Stalls, double StallMs, double ThresholdUs)
         ComputePollRate(List<UsbTransaction> txSorted)
     {
         var all = new List<double>();
+        var timed = new List<(double IntervalUs, double AtMs)>();
         for (int i = 1; i < txSorted.Count; i++)
         {
             double interval = (txSorted[i].EndTimestamp - txSorted[i - 1].EndTimestamp) * 1000;
-            if (interval >= 0 && interval < 50000) all.Add(interval);
+            if (interval >= 0 && interval < 50000)
+            {
+                all.Add(interval);
+                timed.Add((interval, txSorted[i].EndTimestamp));
+            }
         }
-        if (all.Count == 0) return (0, all, 0, 0, 0);
+        if (all.Count == 0) return (0, all, timed, 0, 0);
 
         double median = Percentile(all.OrderBy(x => x).ToList(), 50);
         double thresholdUs = Math.Max(4 * median, 1000);
 
         var steady = all.Where(x => x < thresholdUs).ToList();
-        int stallCount = all.Count - steady.Count;
-        double stallMs = all.Where(x => x >= thresholdUs).Sum() / 1000.0;
+        var stalls = timed.Where(t => t.IntervalUs >= thresholdUs).ToList();
+        double stallMs = stalls.Sum(t => t.IntervalUs) / 1000.0;
 
         double avgUs = steady.Count > 0 ? steady.Average() : 0;
         double rate = avgUs > 0 ? 1000000.0 / avgUs : 0;
-        return (rate, all, stallCount, stallMs, thresholdUs);
+        return (rate, all, stalls, stallMs, thresholdUs);
     }
 
     static double Percentile(List<double> sorted, double p)
