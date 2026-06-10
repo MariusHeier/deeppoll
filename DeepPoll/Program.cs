@@ -51,6 +51,29 @@ class Program
     static string DeviceDisplayName(string vidPid) =>
         KnownDevices.TryGetValue(vidPid, out var name) ? name : vidPid;
 
+    // Raw CPU counters for measuring system load across the capture window.
+    // Busy systems add genuine USB completion jitter (DPC latency); reporting
+    // it preempts "why does my reading look noisy" support questions.
+    static (ulong Idle, ulong Timestamp) ReadCpuRaw()
+    {
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT PercentIdleTime, TimeStamp_Sys100NS FROM Win32_PerfRawData_PerfOS_Processor WHERE Name='_Total'");
+            foreach (var obj in searcher.Get())
+                return (Convert.ToUInt64(obj["PercentIdleTime"]), Convert.ToUInt64(obj["TimeStamp_Sys100NS"]));
+        }
+        catch { }
+        return (0, 0);
+    }
+
+    static double CpuBusyPercent((ulong Idle, ulong Timestamp) start, (ulong Idle, ulong Timestamp) end)
+    {
+        if (start.Timestamp == 0 || end.Timestamp <= start.Timestamp) return -1;
+        double busy = 100.0 * (1.0 - (double)(end.Idle - start.Idle) / (end.Timestamp - start.Timestamp));
+        return Math.Max(0, Math.Min(100, busy));
+    }
+
     static List<string> DetectMHDevices()
     {
         var found = new List<string>();
@@ -220,12 +243,12 @@ class Program
         Console.WriteLine($"  Capturing for {durationSeconds} seconds...");
         Console.WriteLine();
 
-        StartEtwCapture(etlPath, durationSeconds);
+        double cpuBusy = StartEtwCapture(etlPath, durationSeconds);
 
         Console.WriteLine("  Processing...");
         Console.WriteLine();
 
-        AnalyzeEtl(etlPath, verbose, deviceFilter);
+        AnalyzeEtl(etlPath, verbose, deviceFilter, cpuBusy);
         try { File.Delete(etlPath); } catch { }
     }
 
@@ -245,12 +268,12 @@ class Program
         Console.WriteLine("  Plug in now! Capturing for 20 seconds...");
         Console.WriteLine();
 
-        StartEtwCapture(etlPath, 20);
+        double cpuBusy = StartEtwCapture(etlPath, 20);
 
         Console.WriteLine("  Processing...");
         Console.WriteLine();
 
-        AnalyzeEtl(etlPath, false, GamepadFilter);
+        AnalyzeEtl(etlPath, false, GamepadFilter, cpuBusy);
 
         string? logId = UploadLog(etlPath, "startup");
         if (logId != null)
@@ -296,9 +319,11 @@ class Program
 
         // Start capture in background
         RunCommand("logman", "stop deeppoll -ets", silent: true);
-        RunCommand("logman", $"start deeppoll -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -nb 64 256 -bs 512 -ets");
+        RunCommand("logman", $"start deeppoll -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -nb 64 256 -bs 512 -ct perf -ets");
         // USBHUB3 rundown events identify connected devices (VID:PID per device handle)
         RunCommand("logman", "update deeppoll -p Microsoft-Windows-USB-USBHUB3 -ets");
+
+        var cpuStart = ReadCpuRaw();
 
         Console.WriteLine();
         Console.WriteLine("  Logging... Press ENTER when disconnect happens.");
@@ -314,6 +339,8 @@ class Program
         }
         Console.ReadKey(true); // consume the key
 
+        double cpuBusy = CpuBusyPercent(cpuStart, ReadCpuRaw());
+
         // Stop capture
         RunCommand("logman", "stop deeppoll -ets");
 
@@ -322,7 +349,7 @@ class Program
         Console.WriteLine("  Processing...");
         Console.WriteLine();
 
-        AnalyzeEtl(etlPath, false, GamepadFilter);
+        AnalyzeEtl(etlPath, false, GamepadFilter, cpuBusy);
 
         string? logId = UploadLog(etlPath, "disconnect");
         if (logId != null)
@@ -341,24 +368,31 @@ class Program
         try { File.Delete(etlPath); } catch { }
     }
 
-    static void StartEtwCapture(string etlPath, int seconds)
+    static double StartEtwCapture(string etlPath, int seconds)
     {
         // Stop any existing trace
         RunCommand("logman", "stop usbpollcap -ets", silent: true);
 
         // Start new trace. Explicit large buffers: at 8 kHz a single device emits
         // ~16k events/s and default buffer settings silently drop events under load,
-        // which reads as a lower poll rate.
-        RunCommand("logman", $"start usbpollcap -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -nb 64 256 -bs 512 -ets");
+        // which reads as a lower poll rate. -ct perf pins the session clock to QPC
+        // so timestamps never fall back to a coarse clock.
+        RunCommand("logman", $"start usbpollcap -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -nb 64 256 -bs 512 -ct perf -ets");
 
         // USBHUB3 rundown events identify connected devices (VID:PID per device handle)
         RunCommand("logman", "update usbpollcap -p Microsoft-Windows-USB-USBHUB3 -ets");
 
+        var cpuStart = ReadCpuRaw();
+
         // Wait
         Thread.Sleep(seconds * 1000);
 
+        double cpuBusy = CpuBusyPercent(cpuStart, ReadCpuRaw());
+
         // Stop trace
         RunCommand("logman", "stop usbpollcap -ets");
+
+        return cpuBusy;
     }
 
     static int CountUsbDevices()
@@ -391,7 +425,7 @@ class Program
         proc?.WaitForExit();
     }
 
-    static void AnalyzeEtl(string etlPath, bool verbose, string? filterDevice = null)
+    static void AnalyzeEtl(string etlPath, bool verbose, string? filterDevice = null, double cpuBusyPct = -1)
     {
         if (!File.Exists(etlPath))
         {
@@ -498,6 +532,12 @@ class Program
         Console.WriteLine($"  Poll Rate:  {pollRate:F0} Hz    Samples: {intervals.Count:N0}");
         if (stallCount > 0)
             Console.WriteLine($"  Stalls:     {stallCount} gap(s) > {stallThresholdUs / 1000.0:F1} ms excluded ({stallMs:F0} ms total)");
+        if (cpuBusyPct >= 50)
+        {
+            Console.WriteLine($"  System:     CPU was {cpuBusyPct:F0}% busy during capture.");
+            Console.WriteLine("              Background load adds jitter - close apps and re-run");
+            Console.WriteLine("              for a cleaner reading.");
+        }
         Console.WriteLine();
         Console.WriteLine("  Timing Distribution:");
         Console.WriteLine();
