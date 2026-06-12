@@ -1,12 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Management;
-using System.Net.Http;
 using System.Security.Principal;
-using System.Text.Json;
 using System.Threading;
 using Microsoft.Diagnostics.Tracing;
 
@@ -29,7 +26,7 @@ class UsbTransaction
 
 class Program
 {
-    const string VERSION = "1.1.3";
+    const string VERSION = "1.2.0";
 
     // Known MH devices. Gaming series is what poll checks target;
     // setup-mode PIDs are recognized only to tell the user to switch modes.
@@ -198,6 +195,9 @@ class Program
             Console.WriteLine("    the board switches to Gaming mode when done.");
         }
         Console.WriteLine();
+        Console.WriteLine("    Sending a log to support? That moved to DeepLog:");
+        Console.WriteLine("    tools.mariusheier.com/deeplog");
+        Console.WriteLine();
         Console.Write("  Select: ");
 
         string? choice = Console.ReadLine()?.Trim();
@@ -210,46 +210,7 @@ class Program
             return;
         }
 
-        // MH4/MH5 - more options
-        Console.WriteLine();
-        PrintSingleLine(60);
-        Console.WriteLine();
-        Console.WriteLine("  What do you want to do?");
-        Console.WriteLine();
-        Console.WriteLine("    [1] Check Poll Rate");
-        Console.WriteLine("    [2] Log USB for Marius (support)");
-        Console.WriteLine();
-        Console.Write("  Select: ");
-
-        choice = Console.ReadLine()?.Trim();
-
-        if (choice == "1")
-        {
-            RunPollCheck(verbose, GamepadFilter, 20);
-            return;
-        }
-
-        // Log for Marius
-        Console.WriteLine();
-        PrintSingleLine(60);
-        Console.WriteLine();
-        Console.WriteLine("  What issue are you logging?");
-        Console.WriteLine();
-        Console.WriteLine("    [1] Startup / Connection issues (20 sec)");
-        Console.WriteLine("    [2] Disconnect during gameplay (up to 30 min)");
-        Console.WriteLine();
-        Console.Write("  Select: ");
-
-        choice = Console.ReadLine()?.Trim();
-
-        if (choice == "1")
-        {
-            RunStartupLog();
-        }
-        else
-        {
-            RunDisconnectLog();
-        }
+        RunPollCheck(verbose, GamepadFilter, 20);
     }
 
     static void RunPollCheck(bool verbose, string? deviceFilter, int durationSeconds = 7, string? deviceInstruction = null)
@@ -279,126 +240,6 @@ class Program
         Console.WriteLine();
 
         AnalyzeEtl(etlPath, verbose, deviceFilter, cpuTimeline);
-        try { File.Delete(etlPath); } catch { }
-    }
-
-    static void RunStartupLog()
-    {
-        Console.WriteLine();
-        Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
-        Console.WriteLine("  │  UNPLUG your MH4/MH5 controller now.                │");
-        Console.WriteLine("  │                                                     │");
-        Console.WriteLine("  │  Press ENTER when ready, then plug it in.           │");
-        Console.WriteLine("  └─────────────────────────────────────────────────────┘");
-        Console.ReadLine();
-
-        string etlPath = Path.Combine(Path.GetTempPath(), "deeppoll_startup.etl");
-
-        Console.WriteLine();
-        Console.WriteLine("  Plug in now! Capturing for 20 seconds...");
-        Console.WriteLine();
-
-        var cpuTimeline = StartEtwCapture(etlPath, 20);
-
-        Console.WriteLine("  Processing...");
-        Console.WriteLine();
-
-        AnalyzeEtl(etlPath, false, GamepadFilter, cpuTimeline);
-
-        string? logId = UploadLog(etlPath, "startup");
-        if (logId != null)
-        {
-            Console.WriteLine();
-            Console.WriteLine($"  ┌─────────────────────────────────────────────────────┐");
-            Console.WriteLine($"  │  Upload complete!                                    │");
-            Console.WriteLine($"  │                                                     │");
-            Console.WriteLine($"  │  Log ID: {logId,-43} │");
-            Console.WriteLine($"  │                                                     │");
-            Console.WriteLine($"  │  Send this ID to Marius on Discord:                 │");
-            Console.WriteLine($"  │  https://discord.gg/4Q9SRUt85j                      │");
-            Console.WriteLine($"  └─────────────────────────────────────────────────────┘");
-        }
-
-        try { File.Delete(etlPath); } catch { }
-    }
-
-    static void RunDisconnectLog()
-    {
-        // Check disk space (need ~500MB free for 30 min capture)
-        var drive = new DriveInfo(Path.GetTempPath());
-        long freeGB = drive.AvailableFreeSpace / 1024 / 1024 / 1024;
-        if (freeGB < 1)
-        {
-            Console.WriteLine();
-            Console.WriteLine("  Not enough disk space! Need at least 1GB free.");
-            Console.WriteLine($"  Available: {freeGB}GB");
-            return;
-        }
-
-        Console.WriteLine();
-        Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
-        Console.WriteLine("  │  Make sure your MH4/MH5 is connected.               │");
-        Console.WriteLine("  │                                                     │");
-        Console.WriteLine("  │  Press ENTER to start logging.                      │");
-        Console.WriteLine("  │  Press ENTER again when disconnect happens.         │");
-        Console.WriteLine("  │  (Max 30 minutes)                                   │");
-        Console.WriteLine("  └─────────────────────────────────────────────────────┘");
-        Console.ReadLine();
-
-        string etlPath = Path.Combine(Path.GetTempPath(), "deeppoll_disconnect.etl");
-
-        // Start capture in background
-        RunCommand("logman", "stop deeppoll -ets", silent: true);
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        RunCommand("logman", $"start deeppoll -p Microsoft-Windows-USB-UCX -o \"{etlPath}\" -nb 64 256 -bs 512 -ct perf -ets");
-        // USBHUB3 rundown events identify connected devices (VID:PID per device handle)
-        RunCommand("logman", "update deeppoll -p Microsoft-Windows-USB-USBHUB3 -ets");
-
-        Console.WriteLine();
-        Console.WriteLine("  Logging... Press ENTER when disconnect happens.");
-        Console.WriteLine();
-
-        // Wait for user or timeout (30 min), sampling CPU load each second
-        var cpuTimeline = new List<(double TimeMs, double BusyPct)>();
-        var prevCpu = ReadCpuRaw();
-        var startTime = DateTime.Now;
-        while (!Console.KeyAvailable && (DateTime.Now - startTime).TotalMinutes < 30)
-        {
-            var elapsed = DateTime.Now - startTime;
-            Console.Write($"\r  Recording: {elapsed:mm\\:ss}  ");
-            Thread.Sleep(1000);
-
-            var curCpu = ReadCpuRaw();
-            double busy = CpuBusyPercent(prevCpu, curCpu);
-            if (busy >= 0) cpuTimeline.Add((sw.Elapsed.TotalMilliseconds, busy));
-            prevCpu = curCpu;
-        }
-        Console.ReadKey(true); // consume the key
-
-        // Stop capture
-        RunCommand("logman", "stop deeppoll -ets");
-
-        Console.WriteLine();
-        Console.WriteLine();
-        Console.WriteLine("  Processing...");
-        Console.WriteLine();
-
-        AnalyzeEtl(etlPath, false, GamepadFilter, cpuTimeline);
-
-        string? logId = UploadLog(etlPath, "disconnect");
-        if (logId != null)
-        {
-            Console.WriteLine();
-            Console.WriteLine($"  ┌─────────────────────────────────────────────────────┐");
-            Console.WriteLine($"  │  Upload complete!                                    │");
-            Console.WriteLine($"  │                                                     │");
-            Console.WriteLine($"  │  Log ID: {logId,-43} │");
-            Console.WriteLine($"  │                                                     │");
-            Console.WriteLine($"  │  Send this ID to Marius on Discord:                 │");
-            Console.WriteLine($"  │  https://discord.gg/4Q9SRUt85j                      │");
-            Console.WriteLine($"  └─────────────────────────────────────────────────────┘");
-        }
-
         try { File.Delete(etlPath); } catch { }
     }
 
@@ -1027,107 +868,5 @@ class Program
 
         string bar = new string('█', barLen);
         Console.WriteLine($"  {label,7}  {bar.PadRight(barWidth)}  {count,6:N0}");
-    }
-
-    static string? UploadLog(string etlPath, string logType)
-    {
-        Console.WriteLine();
-        Console.WriteLine("  ┌─────────────────────────────────────────────────────┐");
-        Console.WriteLine("  │  Upload log to Marius for analysis?                 │");
-        Console.WriteLine("  └─────────────────────────────────────────────────────┘");
-        Console.WriteLine();
-        Console.WriteLine("    [1] Yes, upload");
-        Console.WriteLine("    [2] No, skip");
-        Console.WriteLine();
-        Console.Write("  Select: ");
-
-        string? choice = Console.ReadLine()?.Trim();
-        if (choice != "1") return null;
-
-        Console.WriteLine();
-        Console.Write("  Your nickname (Discord/name): ");
-        string? nickname = Console.ReadLine()?.Trim();
-        if (string.IsNullOrEmpty(nickname))
-        {
-            Console.WriteLine("  Skipped - no nickname provided.");
-            return null;
-        }
-
-        Console.WriteLine();
-        Console.WriteLine("  Compressing...");
-
-        // Compress the ETL file
-        string gzPath = etlPath + ".gz";
-        try
-        {
-            using (var input = File.OpenRead(etlPath))
-            using (var output = File.Create(gzPath))
-            using (var gz = new GZipStream(output, CompressionLevel.Optimal))
-            {
-                input.CopyTo(gz);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  Compression failed: {ex.Message}");
-            return null;
-        }
-
-        long fileSize = new FileInfo(gzPath).Length;
-        Console.WriteLine($"  Compressed: {fileSize / 1024 / 1024} MB");
-        Console.WriteLine();
-        Console.WriteLine("  Uploading...");
-
-        try
-        {
-            using var client = new HttpClient();
-            client.Timeout = TimeSpan.FromMinutes(10);
-
-            // Get presigned URL
-            var requestBody = JsonSerializer.Serialize(new
-            {
-                nickname = nickname,
-                logType = logType,
-                fileSize = fileSize
-            });
-
-            var urlResponse = client.PostAsync(
-                "https://tools.mariusheier.com/deeppoll/upload-url",
-                new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
-            ).Result;
-
-            if (!urlResponse.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"  Failed to get upload URL: {urlResponse.StatusCode}");
-                try { File.Delete(gzPath); } catch { }
-                return null;
-            }
-
-            var urlData = JsonSerializer.Deserialize<JsonElement>(urlResponse.Content.ReadAsStringAsync().Result);
-            string uploadUrl = urlData.GetProperty("url").GetString() ?? "";
-            string logId = urlData.GetProperty("id").GetString() ?? "";
-
-            // Upload file
-            using var fileContent = new ByteArrayContent(File.ReadAllBytes(gzPath));
-            fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/gzip");
-
-            var uploadResponse = client.PutAsync(uploadUrl, fileContent).Result;
-
-            try { File.Delete(gzPath); } catch { }
-
-            if (!uploadResponse.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"  Upload failed: {uploadResponse.StatusCode}");
-                return null;
-            }
-
-            return logId;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  Upload failed: {ex.Message}");
-            try { File.Delete(gzPath); } catch { }
-            return null;
-        }
     }
 }
