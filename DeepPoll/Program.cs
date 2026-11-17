@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -429,6 +429,7 @@ class Program
         List<UsbTransaction> selectedTransactions = selectedGroup.Transactions
             .GroupBy(t => t.PipeHandle)
             .OrderByDescending(g => g.Count())
+            .ThenBy(g => g.Key)
             .First()
             .OrderBy(t => t.EndTimestamp)
             .ToList();
@@ -446,14 +447,22 @@ class Program
         }
 
         // A pad that reports only on change is silent at rest, and with coarse
-        // stick steps it skips polls even while the sticks move: the average
-        // over the capture is then its report count, not the poll rate. A report
+        // stick steps it skips polls even while the sticks move: the reports it
+        // delivers over the capture then fall far below the poll rate. A report
         // can only leave on a poll, so the shortest spacing between two reports
         // is the poll period, however few reports there are.
         var grid = PollGrid(intervals);
-        double averageHz = pollRate;
-        bool onChange = grid.RateHz > 0 && averageHz < grid.RateHz * 0.9;
-        bool notMeasured = grid.RateHz == 0 && expectedOnChange(selectedVidPid, averageHz);
+
+        // Reports actually delivered per second of capture, silences included.
+        // This is the switch between the two readings, and it needs no device
+        // id: firmware that reports on every poll keeps this near the grid rate,
+        // so its stall lines (the port/cable diagnosis) stay; a pad that reports
+        // only on change, or that rested mid-capture, falls below it.
+        double reportsPerSec = captureDurationMs > 0
+            ? selectedTransactions.Count * 1000.0 / captureDurationMs
+            : pollRate;
+        bool onChange = grid.RateHz > 0 && reportsPerSec < grid.RateHz * 0.9;
+        bool notMeasured = grid.RateHz == 0 && expectedOnChange(selectedVidPid, reportsPerSec);
         if (onChange)
         {
             pollRate = grid.RateHz;
@@ -490,7 +499,7 @@ class Program
             Console.WriteLine("  Poll Rate:  not measured - the pad sent too few reports.");
             if (deviceBIntervals.TryGetValue(selectedVidPid, out int biIdle) && biIdle > 0)
                 Console.WriteLine($"  Configured: {8000.0 / Math.Pow(2, biIdle - 1):F0} Hz (USB descriptor bInterval={biIdle})");
-            Console.WriteLine($"  Reports:    {averageHz:F0} per second in this capture.");
+            Console.WriteLine($"  Reports:    {reportsPerSec:F0} per second in this capture.");
             Console.WriteLine("  Note:       XInput mode sends data only when something on the");
             Console.WriteLine("              controller changed, so a controller at rest sends");
             Console.WriteLine("              almost nothing. That is normal and is not the polling");
@@ -503,7 +512,7 @@ class Program
         Console.WriteLine($"  Poll Rate:  {pollRate:F0} Hz    Samples: {intervals.Count:N0}");
         if (onChange)
         {
-            Console.WriteLine($"  Reports:    {averageHz:F0} per second in this capture.");
+            Console.WriteLine($"  Reports:    {reportsPerSec:F0} per second in this capture.");
             Console.WriteLine("  Note:       XInput mode sends data only when something on the");
             Console.WriteLine("              controller changed. The PC still polls at the Poll");
             Console.WriteLine("              Rate above, and a change goes");
@@ -918,11 +927,11 @@ class Program
         return (rate, all, stalls, stallMs, thresholdUs);
     }
 
-    // A reading far below the nominal rate on a pad whose firmware may report
+    // Too few reports to read a grid, on a known pad whose firmware may report
     // only on change: say "not measured" rather than show the report count as
     // the poll rate.
-    static bool expectedOnChange(string vidPid, double averageHz) =>
-        ExpectedRates.TryGetValue(vidPid, out var exp) && averageHz < exp * 0.5;
+    static bool expectedOnChange(string vidPid, double reportsPerSec) =>
+        ExpectedRates.TryGetValue(vidPid, out var exp) && reportsPerSec < exp * 0.5;
 
     // The poll period from the spacing of reports. The host polls on a fixed
     // grid (125 us x 2^n at high speed) and a report can only leave on a poll,
@@ -938,7 +947,14 @@ class Program
         {
             var onStep = positive.Where(x => x >= period * 0.65 && x <= period * 1.35).ToList();
             if (onStep.Count >= need)
-                return (1000000.0 / onStep.Average(), onStep);
+            {
+                // Batched completions can sit below one period (two reports
+                // delivered in one DPC), which would drag the mean above the
+                // grid step and report a rate faster than the host can poll.
+                // The poll rate cannot exceed the step, so cap it there.
+                double rate = 1000000.0 / onStep.Average();
+                return (Math.Min(rate, 1000000.0 / period), onStep);
+            }
         }
         return (0, new List<double>());
     }
