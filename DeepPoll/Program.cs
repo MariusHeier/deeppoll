@@ -453,13 +453,18 @@ class Program
         // is the poll period, however few reports there are.
         var grid = PollGrid(intervals);
 
-        // Reports actually delivered per second of capture, silences included.
+        // Reports delivered per second over the pad's own time in the capture
+        // (its first report to its last), silences in between included. Not the
+        // length of the whole trace: a trace runs longer than the pad's traffic
+        // (other devices, start-up, a pad plugged in late), and dividing by it
+        // made pads that report on every poll look like they rest.
         // This is the switch between the two readings, and it needs no device
         // id: firmware that reports on every poll keeps this near the grid rate,
         // so its stall lines (the port/cable diagnosis) stay; a pad that reports
         // only on change, or that rested mid-capture, falls below it.
-        double reportsPerSec = captureDurationMs > 0
-            ? selectedTransactions.Count * 1000.0 / captureDurationMs
+        double padSpanMs = sorted.Count > 1 ? sorted[^1].EndTimestamp - sorted[0].EndTimestamp : 0;
+        double reportsPerSec = padSpanMs > 0
+            ? (sorted.Count - 1) * 1000.0 / padSpanMs
             : pollRate;
         bool onChange = grid.RateHz > 0 && reportsPerSec < grid.RateHz * 0.9;
         bool notMeasured = grid.RateHz == 0 && expectedOnChange(selectedVidPid, reportsPerSec);
