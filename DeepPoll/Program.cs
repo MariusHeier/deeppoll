@@ -924,6 +924,10 @@ class Program
 
         double avgUs = steady.Count > 0 ? steady.Average() : 0;
         double rate = avgUs > 0 ? 1000000.0 / avgUs : 0;
+        // No USB device polls faster than once per high-speed microframe
+        // (8000/s). A higher average comes from batched completions timestamped
+        // within one microframe, not a faster device; cap at the physical limit.
+        rate = Math.Min(rate, 8000.0);
         return (rate, all, stalls, stallMs, thresholdUs);
     }
 
