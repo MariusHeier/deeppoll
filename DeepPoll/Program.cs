@@ -491,10 +491,11 @@ class Program
             if (deviceBIntervals.TryGetValue(selectedVidPid, out int biIdle) && biIdle > 0)
                 Console.WriteLine($"  Configured: {8000.0 / Math.Pow(2, biIdle - 1):F0} Hz (USB descriptor bInterval={biIdle})");
             Console.WriteLine($"  Reports:    {averageHz:F0} per second in this capture.");
-            Console.WriteLine("  Note:       This pad sends a report only when an input changes,");
-            Console.WriteLine("              so at rest it sends very few. That is normal and is");
-            Console.WriteLine("              not the polling rate. Run the check again and move");
-            Console.WriteLine("              both sticks in fast circles for the whole capture.");
+            Console.WriteLine("  Note:       XInput mode sends data only when something on the");
+            Console.WriteLine("              controller changed, so a controller at rest sends");
+            Console.WriteLine("              almost nothing. That is normal and is not the polling");
+            Console.WriteLine("              rate. Run the check again and keep both sticks moving");
+            Console.WriteLine("              for the whole capture.");
             PrintDoubleLine(60);
             Console.WriteLine();
             return;
@@ -503,11 +504,15 @@ class Program
         if (onChange)
         {
             Console.WriteLine($"  Reports:    {averageHz:F0} per second in this capture.");
-            Console.WriteLine("  Note:       This pad sends a report only when an input changes,");
-            Console.WriteLine("              so it sends fewer reports than there are polls.");
-            Console.WriteLine("              The poll rate is read from reports on back-to-back");
-            Console.WriteLine("              polls. Nothing is lost: a change goes out on the");
-            Console.WriteLine("              next poll.");
+            Console.WriteLine("  Note:       XInput mode sends data only when something on the");
+            Console.WriteLine("              controller changed. The PC still polls 8000 times");
+            Console.WriteLine("              per second (the Poll Rate above), and a change goes");
+            Console.WriteLine("              out on the next poll. The Reports number follows how");
+            Console.WriteLine("              much you moved the sticks, so it differs from run to");
+            Console.WriteLine("              run and is lower with 8-bit sticks. It is not a speed");
+            Console.WriteLine("              or quality number.");
+            Console.WriteLine("  Tip:        To check a USB port or cable, run this in PS4 mode:");
+            Console.WriteLine("              it sends on every poll, so a bad port shows as gaps.");
         }
 
         if (isSetupMode)
