@@ -505,8 +505,8 @@ class Program
         {
             Console.WriteLine($"  Reports:    {averageHz:F0} per second in this capture.");
             Console.WriteLine("  Note:       XInput mode sends data only when something on the");
-            Console.WriteLine("              controller changed. The PC still polls 8000 times");
-            Console.WriteLine("              per second (the Poll Rate above), and a change goes");
+            Console.WriteLine("              controller changed. The PC still polls at the Poll");
+            Console.WriteLine("              Rate above, and a change goes");
             Console.WriteLine("              out on the next poll. The Reports number follows how");
             Console.WriteLine("              much you moved the sticks, so it differs from run to");
             Console.WriteLine("              run and is lower with 8-bit sticks. It is not a speed");
