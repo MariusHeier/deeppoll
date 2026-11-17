@@ -242,9 +242,7 @@ class Program
             return;
         }
 
-        // Newer firmware sends a report only when an input changes, so the
-        // rate can only be read while something moves.
-        RunPollCheck(verbose, GamepadFilter, 20, "Move both sticks in fast circles during capture.");
+        RunPollCheck(verbose, GamepadFilter, 20);
     }
 
     static void RunPollCheck(bool verbose, string? deviceFilter, int durationSeconds = 7, string? deviceInstruction = null)
@@ -446,37 +444,6 @@ class Program
             return;
         }
 
-        // A pad that reports only on change is silent at rest, and with coarse
-        // stick steps it skips polls even while the sticks move: the reports it
-        // delivers over the capture then fall far below the poll rate. A report
-        // can only leave on a poll, so the shortest spacing between two reports
-        // is the poll period, however few reports there are.
-        var grid = PollGrid(intervals);
-
-        // Reports delivered per second over the pad's own time in the capture
-        // (its first report to its last), silences in between included. Not the
-        // length of the whole trace: a trace runs longer than the pad's traffic
-        // (other devices, start-up, a pad plugged in late), and dividing by it
-        // made pads that report on every poll look like they rest.
-        // This is the switch between the two readings, and it needs no device
-        // id: firmware that reports on every poll keeps this near the grid rate,
-        // so its stall lines (the port/cable diagnosis) stay; a pad that reports
-        // only on change, or that rested mid-capture, falls below it.
-        double padSpanMs = sorted.Count > 1 ? sorted[^1].EndTimestamp - sorted[0].EndTimestamp : 0;
-        double reportsPerSec = padSpanMs > 0
-            ? (sorted.Count - 1) * 1000.0 / padSpanMs
-            : pollRate;
-        bool onChange = grid.RateHz > 0 && reportsPerSec < grid.RateHz * 0.9;
-        bool notMeasured = grid.RateHz == 0 && expectedOnChange(selectedVidPid, reportsPerSec);
-        if (onChange)
-        {
-            pollRate = grid.RateHz;
-            intervals = grid.Intervals;
-            stalls.Clear();
-            stallCount = 0;
-            stallMs = 0;
-        }
-
         var sortedIntervals = intervals.OrderBy(x => x).ToList();
         double maxInterval = sortedIntervals.Last();
 
@@ -499,35 +466,27 @@ class Program
             Console.WriteLine($"  Device:     {DeviceDisplayName(selectedVidPid)}  [{selectedVidPid}]");
         if (DeviceModes.TryGetValue(selectedVidPid, out var deviceMode))
             Console.WriteLine($"  Mode:       {deviceMode}");
-        if (notMeasured)
+        // XInput reports only when something on the controller changes, so the
+        // host's poll rate cannot be read from report timing. For those pads
+        // show what was actually delivered (over the pad's own span, first report
+        // to last) under its own name, with no poll rate and no fault lines, and
+        // point the 8k test at PS4 mode - which sends on every poll.
+        bool isXInput = deviceMode == "XInput (gaming)";
+        if (isXInput)
         {
-            Console.WriteLine("  Poll Rate:  not measured - the pad sent too few reports.");
-            if (deviceBIntervals.TryGetValue(selectedVidPid, out int biIdle) && biIdle > 0)
-                Console.WriteLine($"  Configured: {8000.0 / Math.Pow(2, biIdle - 1):F0} Hz (USB descriptor bInterval={biIdle})");
-            Console.WriteLine($"  Reports:    {reportsPerSec:F0} per second in this capture.");
-            Console.WriteLine("  Note:       XInput mode sends data only when something on the");
-            Console.WriteLine("              controller changed, so a controller at rest sends");
-            Console.WriteLine("              almost nothing. That is normal and is not the polling");
-            Console.WriteLine("              rate. Run the check again and keep both sticks moving");
-            Console.WriteLine("              for the whole capture.");
+            double padSpanMs = sorted.Count > 1 ? sorted[^1].EndTimestamp - sorted[0].EndTimestamp : 0;
+            double reportsPerSec = padSpanMs > 0 ? (sorted.Count - 1) * 1000.0 / padSpanMs : pollRate;
+            Console.WriteLine($"  Reports:    {reportsPerSec:F0} per second (XInput sends on change)");
+            Console.WriteLine("  Note:       XInput only sends data to the computer when");
+            Console.WriteLine("              something on the controller has changed, so");
+            Console.WriteLine("              this number follows how much you moved, not");
+            Console.WriteLine("              how fast the board is polled. To test 8k on");
+            Console.WriteLine("              a Marius Board, use PS4 mode.");
             PrintDoubleLine(60);
             Console.WriteLine();
             return;
         }
         Console.WriteLine($"  Poll Rate:  {pollRate:F0} Hz    Samples: {intervals.Count:N0}");
-        if (onChange)
-        {
-            Console.WriteLine($"  Reports:    {reportsPerSec:F0} per second in this capture.");
-            Console.WriteLine("  Note:       XInput mode sends data only when something on the");
-            Console.WriteLine("              controller changed. The PC still polls at the Poll");
-            Console.WriteLine("              Rate above, and a change goes");
-            Console.WriteLine("              out on the next poll. The Reports number follows how");
-            Console.WriteLine("              much you moved the sticks, so it differs from run to");
-            Console.WriteLine("              run and is lower with 8-bit sticks. It is not a speed");
-            Console.WriteLine("              or quality number.");
-            Console.WriteLine("  Tip:        To check a USB port or cable, run this in PS4 mode:");
-            Console.WriteLine("              it sends on every poll, so a bad port shows as gaps.");
-        }
 
         if (isSetupMode)
         {
@@ -935,12 +894,6 @@ class Program
         rate = Math.Min(rate, 8000.0);
         return (rate, all, stalls, stallMs, thresholdUs);
     }
-
-    // Too few reports to read a grid, on a known pad whose firmware may report
-    // only on change: say "not measured" rather than show the report count as
-    // the poll rate.
-    static bool expectedOnChange(string vidPid, double reportsPerSec) =>
-        ExpectedRates.TryGetValue(vidPid, out var exp) && reportsPerSec < exp * 0.5;
 
     // The poll period from the spacing of reports. The host polls on a fixed
     // grid (125 us x 2^n at high speed) and a report can only leave on a poll,
