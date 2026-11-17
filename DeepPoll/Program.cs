@@ -445,17 +445,19 @@ class Program
             return;
         }
 
-        // A pad that reports only on change is silent at rest: the average over
-        // the whole capture is then its report count, not the poll rate. The
-        // poll rate shows in the stretches where it reports on every poll.
-        var stream = StreamingRate(sorted);
-        bool onChange = stream.Windows > 0 && stream.ActiveShare < 0.85;
-        bool tooLittleMovement = onChange && stream.ActiveMs < 500;
+        // A pad that reports only on change is silent at rest, and with coarse
+        // stick steps it skips polls even while the sticks move: the average
+        // over the capture is then its report count, not the poll rate. A report
+        // can only leave on a poll, so the shortest spacing between two reports
+        // is the poll period, however few reports there are.
+        var grid = PollGrid(intervals);
         double averageHz = pollRate;
+        bool onChange = grid.RateHz > 0 && averageHz < grid.RateHz * 0.9;
+        bool notMeasured = grid.RateHz == 0 && expectedOnChange(selectedVidPid, averageHz);
         if (onChange)
         {
-            pollRate = stream.RateHz;
-            if (stream.Intervals.Count > 0) intervals = stream.Intervals;
+            pollRate = grid.RateHz;
+            intervals = grid.Intervals;
             stalls.Clear();
             stallCount = 0;
             stallMs = 0;
@@ -483,12 +485,12 @@ class Program
             Console.WriteLine($"  Device:     {DeviceDisplayName(selectedVidPid)}  [{selectedVidPid}]");
         if (DeviceModes.TryGetValue(selectedVidPid, out var deviceMode))
             Console.WriteLine($"  Mode:       {deviceMode}");
-        if (tooLittleMovement)
+        if (notMeasured)
         {
             Console.WriteLine("  Poll Rate:  not measured - the pad sent too few reports.");
             if (deviceBIntervals.TryGetValue(selectedVidPid, out int biIdle) && biIdle > 0)
                 Console.WriteLine($"  Configured: {8000.0 / Math.Pow(2, biIdle - 1):F0} Hz (USB descriptor bInterval={biIdle})");
-            Console.WriteLine($"  Reports:    {averageHz:F0} per second on average in this capture.");
+            Console.WriteLine($"  Reports:    {averageHz:F0} per second in this capture.");
             Console.WriteLine("  Note:       This pad sends a report only when an input changes,");
             Console.WriteLine("              so at rest it sends very few. That is normal and is");
             Console.WriteLine("              not the polling rate. Run the check again and move");
@@ -500,10 +502,12 @@ class Program
         Console.WriteLine($"  Poll Rate:  {pollRate:F0} Hz    Samples: {intervals.Count:N0}");
         if (onChange)
         {
-            Console.WriteLine($"  Measured:   while inputs were moving ({stream.ActiveShare * 100:F0}% of the capture).");
-            Console.WriteLine("  Note:       This pad sends a report only when an input changes.");
-            Console.WriteLine("              At rest it sends few reports; the PC still polls it");
-            Console.WriteLine("              at the rate above.");
+            Console.WriteLine($"  Reports:    {averageHz:F0} per second in this capture.");
+            Console.WriteLine("  Note:       This pad sends a report only when an input changes,");
+            Console.WriteLine("              so it sends fewer reports than there are polls.");
+            Console.WriteLine("              The poll rate is read from reports on back-to-back");
+            Console.WriteLine("              polls. Nothing is lost: a change goes out on the");
+            Console.WriteLine("              next poll.");
         }
 
         if (isSetupMode)
@@ -909,61 +913,29 @@ class Program
         return (rate, all, stalls, stallMs, thresholdUs);
     }
 
-    // Poll rate of a device that may report only on change. The capture is cut
-    // into 50 ms windows. The windows holding more than half of what the
-    // busiest ones hold are the stretches where the device reported on every
-    // poll; the rate is taken from the windows around their median, so neither
-    // a half-filled window at the edge of a movement nor a burst after a host
-    // stall pulls it. Counting completions per window is not disturbed by
-    // batched delivery (several completions with one timestamp). A device that
-    // reports on every poll fills every window.
-    static (double RateHz, double ActiveShare, double ActiveMs, int Windows, List<double> Intervals)
-        StreamingRate(List<UsbTransaction> txSorted, double windowMs = 50)
+    // A reading far below the nominal rate on a pad whose firmware may report
+    // only on change: say "not measured" rather than show the report count as
+    // the poll rate.
+    static bool expectedOnChange(string vidPid, double averageHz) =>
+        ExpectedRates.TryGetValue(vidPid, out var exp) && averageHz < exp * 0.5;
+
+    // The poll period from the spacing of reports. The host polls on a fixed
+    // grid (125 us x 2^n at high speed) and a report can only leave on a poll,
+    // so two reports on back-to-back polls are one period apart. The period is
+    // the shortest grid step that a real share of the intervals sits on; the
+    // rate is the mean of those intervals. Batched deliveries (interval 0
+    // followed by a double one) and skipped polls fall outside and do not count.
+    static (double RateHz, List<double> Intervals) PollGrid(List<double> intervalsUs)
     {
-        var none = (0.0, 1.0, 0.0, 0, new List<double>());
-        if (txSorted.Count < 2) return none;
-        double t0 = txSorted[0].EndTimestamp;
-        int n = (int)((txSorted[^1].EndTimestamp - t0) / windowMs);
-        if (n < 20) return none;
-
-        var counts = new int[n];
-        foreach (var t in txSorted)
+        var positive = intervalsUs.Where(x => x > 0).ToList();
+        int need = Math.Max(40, positive.Count / 100);
+        foreach (double period in new[] { 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0 })
         {
-            int w = (int)((t.EndTimestamp - t0) / windowMs);
-            if (w >= 0 && w < n) counts[w]++;
+            var onStep = positive.Where(x => x >= period * 0.65 && x <= period * 1.35).ToList();
+            if (onStep.Count >= need)
+                return (1000000.0 / onStep.Average(), onStep);
         }
-        var ordered = counts.OrderBy(c => c).ToList();
-        int peak = ordered[Math.Min((int)(n * 0.95), n - 1)];
-        if (peak < 25) return none;             // under 500 reports/s even at its busiest: nothing to read
-
-        var active = new bool[n];
-        var activeCounts = new List<int>();
-        for (int w = 0; w < n; w++)
-        {
-            if (counts[w] > peak * 0.5)
-            {
-                active[w] = true;
-                activeCounts.Add(counts[w]);
-            }
-        }
-        if (activeCounts.Count == 0) return none;
-
-        activeCounts.Sort();
-        double median = activeCounts[activeCounts.Count / 2];
-        var core = activeCounts.Where(c => c >= median * 0.85 && c <= median * 1.15).ToList();
-        double rate = core.Average() / (windowMs / 1000.0);
-
-        var intervals = new List<double>();
-        for (int i = 1; i < txSorted.Count; i++)
-        {
-            int wa = (int)((txSorted[i - 1].EndTimestamp - t0) / windowMs);
-            int wb = (int)((txSorted[i].EndTimestamp - t0) / windowMs);
-            if (wa >= 0 && wb < n && active[wa] && active[wb])
-                intervals.Add((txSorted[i].EndTimestamp - txSorted[i - 1].EndTimestamp) * 1000);
-        }
-
-        double activeMs = activeCounts.Count * windowMs;
-        return (rate, (double)activeCounts.Count / n, activeMs, n, intervals);
+        return (0, new List<double>());
     }
 
     static double Percentile(List<double> sorted, double p)
