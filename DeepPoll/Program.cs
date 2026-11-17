@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -26,7 +26,7 @@ class UsbTransaction
 
 class Program
 {
-    const string VERSION = "1.2.0";
+    const string VERSION = "1.3.0";
 
     // Known MH devices. Gaming series is what poll checks target;
     // setup-mode PIDs are recognized only to tell the user to switch modes.
@@ -36,6 +36,8 @@ class Program
         ["39AE:400D"] = "MH4 Gamepad (Digital)",
         ["39AE:500A"] = "MH5 Gamepad (Analog)",
         ["39AE:500D"] = "MH5 Gamepad (Digital)",
+        ["39AE:300A"] = "MH-XSX Gamepad (Analog)",
+        ["39AE:300D"] = "MH-XSX Gamepad (Digital)",
         ["054C:05C4"] = "MH Gamepad (PS4 Mode)",
         ["1A86:1235"] = "MH-XSX / XInput v1.0",
         ["39AE:4000"] = "MH4 Gamepad (Setup Mode)",
@@ -52,6 +54,8 @@ class Program
         ["39AE:400D"] = "XInput (gaming)",
         ["39AE:500A"] = "XInput (gaming)",
         ["39AE:500D"] = "XInput (gaming)",
+        ["39AE:300A"] = "XInput (gaming)",
+        ["39AE:300D"] = "XInput (gaming)",
         ["1A86:1235"] = "XInput (gaming)",
         ["054C:05C4"] = "PS4 emulation (gaming)",
         ["39AE:4000"] = "WebUSB setup",
@@ -67,11 +71,13 @@ class Program
         ["39AE:400D"] = 8000,
         ["39AE:500A"] = 8000,
         ["39AE:500D"] = 8000,
+        ["39AE:300A"] = 8000,
+        ["39AE:300D"] = 8000,
         ["054C:05C4"] = 8000,
         ["1A86:1235"] = 8000,
     };
 
-    const string GamepadFilter = "39AE:400A,39AE:400D,39AE:500A,39AE:500D,054C:05C4,1A86:1235";
+    const string GamepadFilter = "39AE:400A,39AE:400D,39AE:500A,39AE:500D,39AE:300A,39AE:300D,054C:05C4,1A86:1235";
 
     static string DeviceDisplayName(string vidPid) =>
         KnownDevices.TryGetValue(vidPid, out var name) ? name : vidPid;
@@ -202,7 +208,7 @@ class Program
         if (gaming.Count > 0)
             Console.WriteLine($"    [1] {gaming[0].Name}  (detected)");
         else
-            Console.WriteLine("    [1] MH4 / MH5 Gamepad");
+            Console.WriteLine("    [1] MH4 / MH5 / MH-XSX Gamepad");
         Console.WriteLine("    [2] Other USB Device");
         if (gaming.Count == 0 && detected.Count > 0)
         {
@@ -236,7 +242,9 @@ class Program
             return;
         }
 
-        RunPollCheck(verbose, GamepadFilter, 20);
+        // Newer firmware sends a report only when an input changes, so the
+        // rate can only be read while something moves.
+        RunPollCheck(verbose, GamepadFilter, 20, "Move both sticks in fast circles during capture.");
     }
 
     static void RunPollCheck(bool verbose, string? deviceFilter, int durationSeconds = 7, string? deviceInstruction = null)
@@ -415,7 +423,15 @@ class Program
             selectedGroup = deviceGroups[idx - 1];
         }
 
-        List<UsbTransaction> selectedTransactions = selectedGroup.Transactions;
+        // A device with several endpoints (gamepad reports plus a serial port)
+        // has several pipes. Intervals only mean something inside one pipe:
+        // take the busiest, which is the report endpoint.
+        List<UsbTransaction> selectedTransactions = selectedGroup.Transactions
+            .GroupBy(t => t.PipeHandle)
+            .OrderByDescending(g => g.Count())
+            .First()
+            .OrderBy(t => t.EndTimestamp)
+            .ToList();
         string selectedVidPid = selectedGroup.VidPid;
 
         // Calculate intervals for selected device
@@ -427,6 +443,22 @@ class Program
         {
             Console.WriteLine("  Not enough data to calculate poll rate.");
             return;
+        }
+
+        // A pad that reports only on change is silent at rest: the average over
+        // the whole capture is then its report count, not the poll rate. The
+        // poll rate shows in the stretches where it reports on every poll.
+        var stream = StreamingRate(sorted);
+        bool onChange = stream.Windows > 0 && stream.ActiveShare < 0.85;
+        bool tooLittleMovement = onChange && stream.ActiveMs < 500;
+        double averageHz = pollRate;
+        if (onChange)
+        {
+            pollRate = stream.RateHz;
+            if (stream.Intervals.Count > 0) intervals = stream.Intervals;
+            stalls.Clear();
+            stallCount = 0;
+            stallMs = 0;
         }
 
         var sortedIntervals = intervals.OrderBy(x => x).ToList();
@@ -451,7 +483,28 @@ class Program
             Console.WriteLine($"  Device:     {DeviceDisplayName(selectedVidPid)}  [{selectedVidPid}]");
         if (DeviceModes.TryGetValue(selectedVidPid, out var deviceMode))
             Console.WriteLine($"  Mode:       {deviceMode}");
+        if (tooLittleMovement)
+        {
+            Console.WriteLine("  Poll Rate:  not measured - the pad sent too few reports.");
+            if (deviceBIntervals.TryGetValue(selectedVidPid, out int biIdle) && biIdle > 0)
+                Console.WriteLine($"  Configured: {8000.0 / Math.Pow(2, biIdle - 1):F0} Hz (USB descriptor bInterval={biIdle})");
+            Console.WriteLine($"  Reports:    {averageHz:F0} per second on average in this capture.");
+            Console.WriteLine("  Note:       This pad sends a report only when an input changes,");
+            Console.WriteLine("              so at rest it sends very few. That is normal and is");
+            Console.WriteLine("              not the polling rate. Run the check again and move");
+            Console.WriteLine("              both sticks in fast circles for the whole capture.");
+            PrintDoubleLine(60);
+            Console.WriteLine();
+            return;
+        }
         Console.WriteLine($"  Poll Rate:  {pollRate:F0} Hz    Samples: {intervals.Count:N0}");
+        if (onChange)
+        {
+            Console.WriteLine($"  Measured:   while inputs were moving ({stream.ActiveShare * 100:F0}% of the capture).");
+            Console.WriteLine("  Note:       This pad sends a report only when an input changes.");
+            Console.WriteLine("              At rest it sends few reports; the PC still polls it");
+            Console.WriteLine("              at the rate above.");
+        }
 
         if (isSetupMode)
         {
@@ -854,6 +907,63 @@ class Program
         double avgUs = steady.Count > 0 ? steady.Average() : 0;
         double rate = avgUs > 0 ? 1000000.0 / avgUs : 0;
         return (rate, all, stalls, stallMs, thresholdUs);
+    }
+
+    // Poll rate of a device that may report only on change. The capture is cut
+    // into 50 ms windows. The windows holding more than half of what the
+    // busiest ones hold are the stretches where the device reported on every
+    // poll; the rate is taken from the windows around their median, so neither
+    // a half-filled window at the edge of a movement nor a burst after a host
+    // stall pulls it. Counting completions per window is not disturbed by
+    // batched delivery (several completions with one timestamp). A device that
+    // reports on every poll fills every window.
+    static (double RateHz, double ActiveShare, double ActiveMs, int Windows, List<double> Intervals)
+        StreamingRate(List<UsbTransaction> txSorted, double windowMs = 50)
+    {
+        var none = (0.0, 1.0, 0.0, 0, new List<double>());
+        if (txSorted.Count < 2) return none;
+        double t0 = txSorted[0].EndTimestamp;
+        int n = (int)((txSorted[^1].EndTimestamp - t0) / windowMs);
+        if (n < 20) return none;
+
+        var counts = new int[n];
+        foreach (var t in txSorted)
+        {
+            int w = (int)((t.EndTimestamp - t0) / windowMs);
+            if (w >= 0 && w < n) counts[w]++;
+        }
+        var ordered = counts.OrderBy(c => c).ToList();
+        int peak = ordered[Math.Min((int)(n * 0.95), n - 1)];
+        if (peak < 25) return none;             // under 500 reports/s even at its busiest: nothing to read
+
+        var active = new bool[n];
+        var activeCounts = new List<int>();
+        for (int w = 0; w < n; w++)
+        {
+            if (counts[w] > peak * 0.5)
+            {
+                active[w] = true;
+                activeCounts.Add(counts[w]);
+            }
+        }
+        if (activeCounts.Count == 0) return none;
+
+        activeCounts.Sort();
+        double median = activeCounts[activeCounts.Count / 2];
+        var core = activeCounts.Where(c => c >= median * 0.85 && c <= median * 1.15).ToList();
+        double rate = core.Average() / (windowMs / 1000.0);
+
+        var intervals = new List<double>();
+        for (int i = 1; i < txSorted.Count; i++)
+        {
+            int wa = (int)((txSorted[i - 1].EndTimestamp - t0) / windowMs);
+            int wb = (int)((txSorted[i].EndTimestamp - t0) / windowMs);
+            if (wa >= 0 && wb < n && active[wa] && active[wb])
+                intervals.Add((txSorted[i].EndTimestamp - txSorted[i - 1].EndTimestamp) * 1000);
+        }
+
+        double activeMs = activeCounts.Count * windowMs;
+        return (rate, (double)activeCounts.Count / n, activeMs, n, intervals);
     }
 
     static double Percentile(List<double> sorted, double p)
